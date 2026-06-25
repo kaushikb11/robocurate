@@ -84,13 +84,12 @@ def plot_signal_distributions(result: CurationResult, out_path: str | Path) -> P
     return out
 
 
-def plot_curation_summary(scorecard: Scorecard, out_path: str | Path) -> Path:
-    """Plot kept vs removed counts, plus the equal-N baseline size if a baseline is present.
+def _build_curation_summary_figure(scorecard: Scorecard) -> Any:
+    """Build (but do not save) the kept-vs-removed summary figure; returns the Matplotlib figure.
 
-    Saved to ``out_path``; returns the output :class:`~pathlib.Path`.
+    Shared by :func:`plot_curation_summary` (saves to disk) and
+    :func:`render_curation_summary_png` (renders to in-memory bytes) so both stay in sync.
     """
-    from pathlib import Path
-
     plt = _require_matplotlib()
     summary = scorecard.summary
 
@@ -110,12 +109,40 @@ def plot_curation_summary(scorecard: Scorecard, out_path: str | Path) -> Path:
         f"Curation summary — {summary.num_removed}/{summary.num_episodes} removed "
         f"({summary.pct_removed:.1f}%)"
     )
-
     fig.tight_layout()
+    return fig
+
+
+def plot_curation_summary(scorecard: Scorecard, out_path: str | Path) -> Path:
+    """Plot kept vs removed counts, plus the equal-N baseline size if a baseline is present.
+
+    Saved to ``out_path``; returns the output :class:`~pathlib.Path`.
+    """
+    from pathlib import Path
+
+    plt = _require_matplotlib()
+    fig = _build_curation_summary_figure(scorecard)
     out = Path(out_path)
     fig.savefig(out, dpi=100)
     plt.close(fig)
     return out
+
+
+def render_curation_summary_png(scorecard: Scorecard) -> bytes:
+    """Render the kept-vs-removed summary plot to in-memory PNG bytes (for embedding in HTML).
+
+    Mirrors :func:`plot_curation_summary` but returns the PNG bytes instead of writing a file,
+    so a self-contained report can base64-embed the image without touching the filesystem.
+    Requires the ``viz`` extra; raises the same actionable install error otherwise.
+    """
+    import io
+
+    plt = _require_matplotlib()
+    fig = _build_curation_summary_figure(scorecard)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=100)
+    plt.close(fig)
+    return buf.getvalue()
 
 
 def plot_scores_by_group(
@@ -180,4 +207,5 @@ __all__ = [
     "plot_curation_summary",
     "plot_scores_by_group",
     "plot_signal_distributions",
+    "render_curation_summary_png",
 ]

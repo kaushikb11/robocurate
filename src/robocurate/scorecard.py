@@ -19,6 +19,8 @@ No quality signal is implemented here; the scorecard only summarizes scores it i
 
 from __future__ import annotations
 
+import base64
+import html
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -282,6 +284,196 @@ class Scorecard:
         lines.append("")
         return "\n".join(lines)
 
+    def to_html(self) -> str:
+        """Render a single self-contained HTML document for this curation run.
+
+        The output is a standalone file (inline CSS, no external assets): a header with the
+        dataset id, the quality summary, the per-signal distribution table (orientation,
+        min/median/max, skips), the equal-N baseline (invariant 5), the removed-episodes table
+        with per-episode reasons (invariant 6), and — only when a policy evaluation is
+        attached — the downstream effect *with* its CI bounds (invariant 6).
+
+        Matplotlib (the ``viz`` extra) is imported lazily: when present, the kept-vs-removed
+        summary plot is base64-embedded as an ``<img>`` so the file stays self-contained; when
+        absent, the report degrades gracefully to tables only. All free text is HTML-escaped.
+        """
+        parts: list[str] = []
+        parts.append("<!DOCTYPE html>")
+        parts.append('<html lang="en">')
+        parts.append("<head>")
+        parts.append('<meta charset="utf-8">')
+        parts.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
+        parts.append(f"<title>RoboCurate scorecard — {_esc(self.dataset.dataset_id)}</title>")
+        parts.append(f"<style>{_REPORT_CSS}</style>")
+        parts.append("</head>")
+        parts.append("<body>")
+        parts.append('<main class="report">')
+
+        parts.append(self._html_header())
+        parts.append(self._html_summary())
+        parts.append(self._html_summary_plot())
+        parts.append(self._html_signals())
+        parts.append(self._html_baseline())
+        parts.append(self._html_removed())
+        parts.append(self._html_effects())
+
+        parts.append("</main>")
+        parts.append("</body>")
+        parts.append("</html>")
+        return "\n".join(parts)
+
+    # -- HTML section builders -------------------------------------------------------
+
+    def _html_header(self) -> str:
+        d = self.dataset
+        return (
+            "<header>"
+            "<h1>RoboCurate curation scorecard</h1>"
+            f'<p class="dataset-id"><code>{_esc(d.dataset_id)}</code></p>'
+            f'<p class="meta">format: <code>{_esc(d.source_format)}</code> · '
+            f"episodes: {d.num_episodes} · "
+            f"content hash: <code>{_esc(d.content_hash)}</code></p>"
+            "</header>"
+        )
+
+    def _html_summary(self) -> str:
+        s = self.summary
+        return (
+            "<section>"
+            "<h2>Quality summary</h2>"
+            '<ul class="summary">'
+            f"<li><strong>{s.num_removed}/{s.num_episodes}</strong> episodes removed "
+            f"({s.pct_removed:.1f}%)</li>"
+            f"<li><strong>{s.num_kept}</strong> kept</li>"
+            "</ul>"
+            "</section>"
+        )
+
+    def _html_summary_plot(self) -> str:
+        """Embed the kept-vs-removed plot as a base64 PNG when ``viz`` is available."""
+        try:
+            from robocurate.viz import render_curation_summary_png
+        except ImportError:  # pragma: no cover - exercised only without the extra
+            return ""
+        try:
+            png = render_curation_summary_png(self)
+        except ImportError:
+            # Module imported but Matplotlib itself is missing: degrade to tables only.
+            return ""
+        encoded = base64.b64encode(png).decode("ascii")
+        return (
+            '<section class="figure">'
+            f'<img alt="Kept vs removed episodes" '
+            f'src="data:image/png;base64,{encoded}">'
+            "</section>"
+        )
+
+    def _html_signals(self) -> str:
+        rows: list[str] = []
+        if self.per_signal:
+            for sig in self.per_signal:
+                orient = "higher = better" if sig.higher_is_better else "lower = better"
+                rows.append(
+                    "<tr>"
+                    f"<td>{_esc(sig.name)}</td>"
+                    f"<td>{_esc(sig.description)}</td>"
+                    f'<td class="num">{sig.num_scored}</td>'
+                    f'<td class="num">{sig.num_skipped}</td>'
+                    f'<td class="num">{_esc(_fmt(sig.minimum))}</td>'
+                    f'<td class="num">{_esc(_fmt(sig.median))}</td>'
+                    f'<td class="num">{_esc(_fmt(sig.maximum))}</td>'
+                    f"<td>{_esc(orient)}</td>"
+                    "</tr>"
+                )
+            body = (
+                "<table>"
+                "<thead><tr>"
+                "<th>signal</th><th>description</th>"
+                '<th class="num">scored</th><th class="num">skipped</th>'
+                '<th class="num">min</th><th class="num">median</th><th class="num">max</th>'
+                "<th>orientation</th>"
+                "</tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody>"
+                "</table>"
+            )
+        else:
+            body = "<p><em>No signals were run.</em></p>"
+        return f"<section><h2>Signals</h2>{body}</section>"
+
+    def _html_baseline(self) -> str:
+        if self.baseline is None:
+            return ""
+        b = self.baseline
+        return (
+            "<section>"
+            "<h2>Equal-N random baseline</h2>"
+            f"<p>A paired random baseline (<code>{_esc(b.method)}</code>, seed "
+            f"<code>{b.seed}</code>) keeps the <strong>same {b.n}</strong> episodes as the "
+            "curated selection, so the dataset-size confound can be compared away.</p>"
+            "</section>"
+        )
+
+    def _html_removed(self) -> str:
+        removed = [f for f in self.flags if not f.kept]
+        if not removed:
+            return (
+                "<section><h2>Removed episodes</h2><p><em>Nothing was removed.</em></p></section>"
+            )
+        rows: list[str] = []
+        for flag in removed:
+            values = ", ".join(
+                f"{_esc(name)}={_esc(_fmt(value))}"
+                for name, value in sorted(flag.signal_values.items())
+            )
+            rows.append(
+                "<tr>"
+                f'<td class="num">{flag.episode_index}</td>'
+                f"<td>{_esc(flag.reason)}</td>"
+                f"<td>{values or '—'}</td>"
+                "</tr>"
+            )
+        return (
+            "<section>"
+            "<h2>Removed episodes</h2>"
+            "<table>"
+            '<thead><tr><th class="num">episode</th><th>reason</th>'
+            "<th>signal values</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody>"
+            "</table>"
+            "</section>"
+        )
+
+    def _html_effects(self) -> str:
+        if self.effects is None:
+            return (
+                "<section>"
+                "<h2>Downstream effect</h2>"
+                "<p><em>No downstream policy evaluation attached; this scorecard makes no "
+                "claim about training gains.</em></p>"
+                "</section>"
+            )
+        e = self.effects
+        per_task = ""
+        if e.per_task:
+            rows = "".join(
+                f'<tr><td>{_esc(task)}</td><td class="num">{value:+.3f}</td></tr>'
+                for task, value in sorted(e.per_task.items())
+            )
+            per_task = (
+                "<table>"
+                '<thead><tr><th>task</th><th class="num">effect</th></tr></thead>'
+                f"<tbody>{rows}</tbody>"
+                "</table>"
+            )
+        return (
+            "<section>"
+            "<h2>Downstream effect</h2>"
+            f"<p><strong>{_esc(e.metric)}: {e.effect:+.3f}</strong> "
+            f"(95% CI [{e.ci_low:+.3f}, {e.ci_high:+.3f}])</p>"
+            f"{per_task}"
+            "</section>"
+        )
+
     def to_hf_dataset_card(self) -> str:
         """Return a Hugging Face dataset-card fragment summarizing the curation."""
         s = self.summary
@@ -308,6 +500,32 @@ class Scorecard:
 
 def _fmt(value: float | None) -> str:
     return "—" if value is None else f"{value:.3f}"
+
+
+def _esc(text: str) -> str:
+    """HTML-escape free text (including quotes) so user-supplied strings can't break markup."""
+    return html.escape(text, quote=True)
+
+
+_REPORT_CSS = (
+    "body{margin:0;background:#f6f7f9;color:#1a1d24;"
+    "font:15px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}"
+    ".report{max-width:900px;margin:0 auto;padding:2rem;background:#fff;"
+    "box-shadow:0 1px 3px rgba(0,0,0,.08)}"
+    "h1{font-size:1.6rem;margin:0 0 .25rem}"
+    "h2{font-size:1.15rem;margin:1.75rem 0 .5rem;border-bottom:1px solid #e3e6ea;"
+    "padding-bottom:.25rem}"
+    ".dataset-id code{font-size:1rem}"
+    ".meta{color:#5b6472;font-size:.85rem;margin:.25rem 0 0;word-break:break-all}"
+    "code{background:#f0f2f4;padding:.05rem .3rem;border-radius:3px;font-size:.85em}"
+    "ul.summary{list-style:none;padding:0;display:flex;gap:2rem;flex-wrap:wrap}"
+    "table{border-collapse:collapse;width:100%;margin:.5rem 0;font-size:.9rem}"
+    "th,td{text-align:left;padding:.35rem .6rem;border-bottom:1px solid #eceef1}"
+    "th{background:#fafbfc;font-weight:600}"
+    ".num{text-align:right;font-variant-numeric:tabular-nums}"
+    ".figure img{max-width:100%;height:auto}"
+    "em{color:#5b6472}"
+)
 
 
 def _signal_report_from_decisions(
