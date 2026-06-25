@@ -404,14 +404,17 @@ class CurationResult:
         *,
         created_utc: str | None = None,
         write_card: bool = True,
+        push_to_hub: str | None = None,
     ) -> WriteReceipt:
         """Write the curated subset (kept episodes) plus the manifest to ``dest``.
 
         Re-reads the kept episodes from the source reader (streaming; source untouched) and
         writes a new dataset via the writer, which validates schema + checksum + round-trip.
         When ``write_card`` is set (the default), a ``README.md`` Hugging Face dataset card
-        summarizing the curation is written into ``dest`` alongside the manifest. The source
-        dataset is never touched (Invariant 1).
+        summarizing the curation is written into ``dest`` alongside the manifest. When
+        ``push_to_hub`` is a repo id, the *written and validated* output directory is uploaded
+        to the Hugging Face Hub **after** the local write succeeds (reading only from ``dest``,
+        never the source). The source dataset is never touched (Invariant 1).
         """
         from robocurate.adapters.lerobot import LeRobotWriter
 
@@ -426,6 +429,11 @@ class CurationResult:
 
             card = self.scorecard().to_hf_dataset_card()
             (_Path(receipt.path) / "README.md").write_text(card, encoding="utf-8")
+        if push_to_hub is not None:
+            # Push only the validated local output (Invariant 1: never reads the source).
+            from robocurate.hub import maybe_push_to_hub
+
+            maybe_push_to_hub(receipt.path, push_to_hub)
         return receipt
 
     def _require_reader(self) -> DatasetReader:

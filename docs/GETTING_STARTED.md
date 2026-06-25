@@ -58,6 +58,39 @@ Three things were produced:
 The demo is deterministic: the same seed gives byte-identical selection decisions every
 time.
 
+## A few more commands worth knowing
+
+```
+# Which quality signals can I run, and what does each one need installed?
+uv run robocurate list-signals
+
+# Is my dataset healthy before I curate? (read-only: schema, structural defects, coverage)
+uv run robocurate validate ./demo_dataset       # alias: doctor
+
+# Why was one specific episode kept or removed? (reads the saved manifest)
+uv run robocurate explain ./demo_curated 3
+```
+
+## Save a recipe, reproduce the run
+
+A *recipe* captures the full run config — combiner, budget, selection, gate, seed — as a small
+JSON file you can share. Re-running it on the same source reproduces byte-identical decisions:
+
+```
+# Curate, and save the exact knobs you used as a recipe.
+uv run robocurate curate ./demo_dataset --out ./demo_curated \
+    --signals jerk --budget 0.8 --save-recipe ./jerk_80.json
+
+# Later (or on someone else's machine), reproduce it from the recipe alone.
+uv run robocurate curate ./demo_dataset --out ./demo_curated_again --recipe ./jerk_80.json
+```
+
+`--recipe` is mutually exclusive with `--signals`/`--budget` (the recipe already fixes them).
+A `curate` run also writes a Hugging Face `README.md` dataset card by default (`--no-card` to
+skip), can emit a self-contained HTML scorecard with `--report-html report.html`, and can
+publish the curated **output** to the Hub with `--push-to-hub user/my-curated-dataset` (this
+reads only the validated output directory, never your source, and needs the `lerobot` extra).
+
 ## Next, on real data
 
 When you want to see the signals run against a real public dataset with ground-truth

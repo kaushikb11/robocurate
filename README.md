@@ -55,7 +55,18 @@ The full strategy, the honest competitive picture, and where we're weak today ar
   curating a v3 dataset emits a v3 dataset. Plus RLDS / Open X-Embodiment, ManiSkill demonstrations,
   and robomimic. (v3 video-frame decode is a follow-up; low-dim curation needs only pyarrow.)
 - **Curator + CLI**: target-budget top-K, equal-N random baseline, hard validity-gate,
-  greedy keep-one-representative dedup. CLI `curate` / `report` / `diff`.
+  greedy keep-one-representative dedup. CLI `curate` / `report` / `diff`, plus `list-signals`
+  (every loadable quality signal and its install extra), `validate` (alias `doctor` — a
+  read-only dataset health check: schema, structural defects, coverage), and `explain` (why one
+  episode was kept or removed, read from a saved manifest).
+- **Shareable, reproducible curation runs.** Every `curate` write emits a provenance manifest
+  (what was removed and why, the equal-N baseline, the config + seed + code version) and, by
+  default, a Hugging Face `README.md` dataset card summarizing the run (`--no-card` to skip).
+  `--save-recipe`/`--recipe` round-trip the full config as a JSON *recipe* so anyone can
+  reproduce byte-identical decisions; `--report-html` writes a self-contained HTML scorecard;
+  and `--push-to-hub <repo_id>` optionally publishes the curated **output** to the HF Hub after
+  the local write is validated (reads only the output, never the source; needs the `lerobot`
+  extra). v3 image/video frame data is preserved through curation (Stage-1 pass-through).
 - **We test our own signals and honestly report their blind spots.** Two scripts you can run
   on real and synthetic data, framed as methodology rather than as headline numbers:
   - `experiments/robomimic_scorecard.py` — a **ground-truth diagnostic** on robomimic

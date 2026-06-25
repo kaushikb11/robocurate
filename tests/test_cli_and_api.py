@@ -10,6 +10,7 @@ import pytest
 
 from robocurate import Budget, Curator, Dataset, signals
 from robocurate.cli import main
+from robocurate.recipe import save_recipe
 from tests.synthetic import FakeActionMagnitudeSignal, write_synthetic_lerobot_dataset
 
 
@@ -68,3 +69,78 @@ def test_cli_score_without_signals_errors(tmp_path: Path) -> None:
     src = write_synthetic_lerobot_dataset(tmp_path / "src", num_episodes=2)
     with pytest.raises(SystemExit):
         main(["score", str(src)])
+
+
+def test_cli_curate_report_html_and_no_card(tmp_path: Path, fake_signal_registered: None) -> None:
+    src = write_synthetic_lerobot_dataset(tmp_path / "src", num_episodes=6)
+    out = tmp_path / "curated"
+    report = tmp_path / "report.html"
+    rc = main(
+        [
+            "curate",
+            str(src),
+            "--out",
+            str(out),
+            "--signals",
+            "fake_action_magnitude",
+            "--budget",
+            "0.5",
+            "--report-html",
+            str(report),
+            "--no-card",
+        ]
+    )
+    assert rc == 0
+    # HTML report written and self-contained; dataset card suppressed by --no-card.
+    assert report.is_file()
+    assert report.read_text(encoding="utf-8").lstrip().startswith("<!DOCTYPE html>")
+    assert not (out / "README.md").exists()
+
+
+def test_cli_curate_save_and_run_recipe(tmp_path: Path, fake_signal_registered: None) -> None:
+    src = write_synthetic_lerobot_dataset(tmp_path / "src", num_episodes=6)
+    recipe = tmp_path / "recipe.json"
+
+    # 1. Curate from --signals/--budget and save the recipe.
+    rc = main(
+        [
+            "curate",
+            str(src),
+            "--out",
+            str(tmp_path / "curated_a"),
+            "--signals",
+            "fake_action_magnitude",
+            "--budget",
+            "0.5",
+            "--save-recipe",
+            str(recipe),
+        ]
+    )
+    assert rc == 0
+    assert recipe.is_file()
+
+    # 2. Re-run from the saved recipe (no --signals/--budget) to a fresh output dir.
+    rc = main(["curate", str(src), "--out", str(tmp_path / "curated_b"), "--recipe", str(recipe)])
+    assert rc == 0
+    assert (tmp_path / "curated_b" / "manifest.json").is_file()
+
+
+def test_cli_curate_recipe_conflicts_with_signals(
+    tmp_path: Path, fake_signal_registered: None
+) -> None:
+    src = write_synthetic_lerobot_dataset(tmp_path / "src", num_episodes=4)
+    recipe = tmp_path / "recipe.json"
+    save_recipe(Curator([FakeActionMagnitudeSignal()], budget=Budget.fraction(0.5)), recipe)
+    with pytest.raises(SystemExit, match="mutually exclusive"):
+        main(
+            [
+                "curate",
+                str(src),
+                "--out",
+                str(tmp_path / "curated"),
+                "--recipe",
+                str(recipe),
+                "--signals",
+                "fake_action_magnitude",
+            ]
+        )

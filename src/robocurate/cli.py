@@ -62,23 +62,57 @@ def _cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_curate(args: argparse.Namespace) -> int:
-    reader = LeRobotReader(args.dataset)
+def _curate_curator(args: argparse.Namespace) -> Curator:
+    """Build the curator for a ``curate`` run: from a recipe, or from --signals/--budget.
+
+    A recipe is mutually exclusive with --signals/--budget: a recipe already fixes the full
+    config (combiner, budget, selection, gate, seed), so mixing the two would be ambiguous.
+    """
+    from robocurate.recipe import load_recipe
+
+    if args.recipe is not None:
+        if args.signals or args.budget is not None:
+            raise SystemExit(
+                "--recipe is mutually exclusive with --signals/--budget: a recipe already "
+                "fixes the full curation config. Pass one or the other, not both."
+            )
+        return load_recipe(args.recipe)
     budget = Budget.fraction(args.budget) if args.budget is not None else None
-    curator = Curator(
+    return Curator(
         _resolve_signals(_split_csv(args.signals)),
         budget=budget,
         seed=args.seed,
         emit_baseline=not args.no_baseline,
     )
+
+
+def _cmd_curate(args: argparse.Namespace) -> int:
+    from robocurate.recipe import save_recipe
+
+    reader = LeRobotReader(args.dataset)
+    curator = _curate_curator(args)
     result = curator.run(reader)
-    receipt = result.save(args.out)
-    msg = {
+    receipt = result.save(
+        args.out,
+        write_card=not args.no_card,
+        push_to_hub=args.push_to_hub,
+    )
+    if args.report_html is not None:
+        Path(args.report_html).write_text(result.scorecard().to_html(), encoding="utf-8")
+    if args.save_recipe is not None:
+        save_recipe(curator, args.save_recipe)
+    msg: dict[str, Any] = {
         "out": str(receipt.path),
         "kept": result.num_kept,
         "removed": result.num_removed,
         "manifest": str(receipt.manifest_path),
     }
+    if args.report_html is not None:
+        msg["report_html"] = str(args.report_html)
+    if args.save_recipe is not None:
+        msg["recipe"] = str(args.save_recipe)
+    if args.push_to_hub is not None:
+        msg["pushed_to_hub"] = args.push_to_hub
     print(json.dumps(msg) if args.json else msg)
     return 0
 
@@ -332,6 +366,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_curate.add_argument("--budget", type=float, help="fraction of episodes to keep (0-1].")
     p_curate.add_argument(
         "--no-baseline", action="store_true", help="skip the equal-N random baseline."
+    )
+    p_curate.add_argument(
+        "--recipe",
+        help="load a saved JSON recipe and run it instead of --signals/--budget.",
+    )
+    p_curate.add_argument(
+        "--save-recipe", help="write the run's config as a shareable JSON recipe to this path."
+    )
+    p_curate.add_argument(
+        "--report-html", help="write a self-contained HTML curation report to this path."
+    )
+    p_curate.add_argument(
+        "--push-to-hub",
+        metavar="REPO_ID",
+        help="after a successful local write, push the curated output to this HF dataset repo.",
+    )
+    p_curate.add_argument(
+        "--no-card", action="store_true", help="do not write a README.md dataset card."
     )
     add_common(p_curate)
     p_curate.set_defaults(func=_cmd_curate)
