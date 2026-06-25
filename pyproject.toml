@@ -1,0 +1,147 @@
+[project]
+name = "robocurate"
+version = "0.0.1"
+description = "Point it at any robot dataset and it tells you which trajectories are hurting your policy, and hands you back the clean subset that trains a better one."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Kaushik Bokka" }]
+keywords = [
+    "robot-learning",
+    "embodied-ai",
+    "data-curation",
+    "lerobot",
+    "imitation-learning",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+
+# Core dependencies must install clean on a laptop with no GPU. NumPy is the canonical
+# exchange type; nothing here pulls in torch.
+dependencies = [
+    "numpy>=1.24",
+    # The LeRobotDataset format stores tabular data as Parquet. PyArrow is a pure CPU
+    # wheel (no GPU), so the core still installs clean on a laptop.
+    "pyarrow>=15.0",
+]
+
+[project.optional-dependencies]
+# Heavy/learned signals live behind per-signal extras so the core stays torch-free and
+# installs clean on a no-GPU laptop. Each extra pulls only what that signal needs; `all`
+# is the umbrella. Torch is CPU-runnable, so demo-score still works on a laptop.
+demo-score = ["torch>=2.2"]
+influence = ["torch>=2.2"]
+policy = ["torch>=2.2"]
+# RLDS / Open X / DROID datasets are TFDS-based. The reader itself is TF-free (it converts
+# via numpy); this extra is only needed to *load* real datasets through `from_tfds`.
+rlds = ["tensorflow-datasets>=4.9", "tensorflow>=2.15"]
+# `modal` is the deploy tool for running experiments on Modal GPUs, not a runtime dependency
+# of the library — it is only needed locally to `modal run` the experiment app.
+modal = ["modal>=1.0"]
+# Reading ManiSkill HDF5 demonstrations needs only h5py (light). The sim environment needs
+# mani_skill (heavy, GPU). Split so CI can exercise the demo reader without the GPU package.
+maniskill-demos = ["h5py>=3.0"]
+maniskill = ["mani_skill>=3.0.0b", "robocurate[maniskill-demos]"]
+# Reading robomimic HDF5 demonstrations also needs only h5py (an alias of maniskill-demos).
+robomimic = ["h5py>=3.0"]
+# Matplotlib-backed scorecard visualizations (optional reporting helpers, CPU-only).
+viz = ["matplotlib>=3.5"]
+# Downloading a real LeRobotDataset from the Hub (the v3 reader itself needs only pyarrow,
+# already in core; this extra is only for the optional real-Hub-dataset read test / convenience).
+lerobot = ["huggingface_hub>=0.20"]
+all = ["robocurate[demo-score]", "robocurate[influence]", "robocurate[policy]"]
+
+[project.urls]
+Homepage = "https://github.com/kaushikb11/robocurate"
+Repository = "https://github.com/kaushikb11/robocurate"
+Documentation = "https://github.com/kaushikb11/robocurate"
+Issues = "https://github.com/kaushikb11/robocurate/issues"
+
+[project.scripts]
+robocurate = "robocurate.cli:main"
+
+[project.entry-points."robocurate.signals"]
+# Built-in signals register through the same entry-point mechanism the community
+# uses, so adding a signal never touches the core.
+jerk = "robocurate.signals.jerk:Jerk"
+path_efficiency = "robocurate.signals.path_efficiency:PathEfficiency"
+spectral_smoothness = "robocurate.signals.spectral_smoothness:SpectralSmoothness"
+action_noise = "robocurate.signals.action_noise:ActionNoise"
+redundancy = "robocurate.signals.redundancy:Redundancy"
+structural_validity = "robocurate.signals.structural_validity:StructuralValidity"
+sim_physics_validity = "robocurate.signals.sim_validity:SimPhysicsValidity"
+demo_score = "robocurate.signals.demo_score:DemoScore"
+cupid = "robocurate.signals.cupid:Cupid"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/robocurate"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "experiments"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["robocurate"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src", "tests"]
+plugins = []
+# NumPy ships its own stubs; keep third-party import strictness pragmatic.
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# torch is an optional dependency used only through a lazily-imported, Any-typed boundary;
+# don't fail typing on its (partial) stubs or when the extra is absent.
+[[tool.mypy.overrides]]
+module = [
+    "torch", "torch.*",
+    "tensorflow", "tensorflow.*", "tensorflow_datasets", "tensorflow_datasets.*",
+    "gymnasium", "gymnasium.*", "mani_skill", "mani_skill.*",
+    "h5py", "h5py.*",
+    "matplotlib", "matplotlib.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "ml: tests that require an optional ML extra (e.g. torch); skipped in the core-only run",
+    "rlds: tests that require the rlds extra (tensorflow-datasets); skipped in the core-only run",
+    "maniskill: tests that require the maniskill-demos extra (h5py); skipped in the core-only run",
+    "robomimic: tests that require the robomimic extra (h5py); skipped in the core-only run",
+    "viz: tests that require the viz extra (matplotlib); skipped in the core-only run",
+    "lerobot: tests that download a real LeRobot Hub dataset (needs huggingface_hub + network); opt-in",
+]

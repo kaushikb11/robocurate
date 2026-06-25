@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use RoboCurate in your research, please cite it as below."
+title: "RoboCurate"
+abstract: "Point it at any robot dataset and it tells you which trajectories are hurting your policy, and hands you back the clean subset that trains a better one."
+type: software
+authors:
+  - family-names: "Bokka"
+    given-names: "Kaushik"
+version: "0.0.1"
+license: "Apache-2.0"
+repository-code: "https://github.com/kaushikb11/robocurate"

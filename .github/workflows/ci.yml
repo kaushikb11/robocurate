@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Full check with the torch ML extras: lint, format, types, and the suite. The heavy
+  # TensorFlow-based `rlds` extra is covered by its own job below (the RLDS conversion tests
+  # are TF-free and run here; only the eager-tensor test is rlds-marked and skips here).
+  full:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies (torch extras + maniskill-demos h5py)
+        run: uv sync --extra demo-score --extra influence --extra policy --extra maniskill-demos --dev
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Type check (mypy)
+        run: uv run mypy
+
+      - name: Tests (pytest, rlds eager-tensor test skips without TF)
+        run: uv run pytest
+
+  # RLDS / Open X adapter against real TensorFlow, on one Python version (TF is heavy).
+  rlds:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install rlds extra (tensorflow + tfds)
+        run: uv sync --extra rlds --dev
+
+      - name: RLDS tests
+        run: uv run pytest tests/test_rlds_adapter.py
+
+  # Core-only: NO optional extras (no torch). Guards the invariant that the package imports
+  # and the cheap signals work on a clean, no-GPU install. ML-marked tests are skipped.
+  core-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install core + dev only (no extras)
+        run: uv sync --dev
+
+      - name: Assert torch is NOT installed
+        run: |
+          if uv run python -c "import torch" 2>/dev/null; then
+            echo "torch must not be present in the core-only environment"; exit 1
+          fi
+
+      - name: Import smoke test (package + cheap signals load without torch)
+        run: uv run python -c "import robocurate; from robocurate import signals; print(signals.available())"
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Tests (core only, ML + rlds + maniskill tests skipped)
+        run: uv run pytest -m "not ml and not rlds and not maniskill"
