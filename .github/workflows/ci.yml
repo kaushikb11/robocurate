@@ -60,6 +60,28 @@ jobs:
       - name: RLDS tests
         run: uv run pytest tests/test_rlds_adapter.py
 
+  # Determinism gate (invariant 3): a curation run twice on the same input + seed must produce
+  # byte-identical decisions, reasons, signal values, baseline draw, and manifest. Torch-free
+  # and CPU-only, so it runs on the lightweight core-only environment.
+  determinism:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install core + dev only (no extras; determinism is CPU/torch-free)
+        run: uv sync --frozen --dev
+
+      - name: Determinism tests (invariant 3)
+        run: uv run pytest tests/test_determinism.py -v
+
   # Core-only: NO optional extras (no torch). Guards the invariant that the package imports
   # and the cheap signals work on a clean, no-GPU install. ML-marked tests are skipped.
   core-only:
