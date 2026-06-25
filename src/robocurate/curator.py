@@ -322,6 +322,31 @@ class CurationConfig:
             "batch_size": self.batch_size,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CurationConfig:
+        """Reconstruct a :class:`CurationConfig` from its :meth:`to_dict` form.
+
+        Inverse of :meth:`to_dict`. The nested combiner/gate dicts are kept as plain mappings
+        (they are reconstructed into live objects by the recipe loader, not here), so this
+        stays a pure data round-trip with no engine imports.
+        """
+        budget_dict = data.get("budget")
+        budget = (
+            Budget(kind=BudgetKind(budget_dict["kind"]), value=float(budget_dict["value"]))
+            if budget_dict is not None
+            else None
+        )
+        gate_dict = data.get("gate")
+        return cls(
+            combiner_dict=dict(data.get("combiner", {})),
+            budget=budget,
+            seed=int(data.get("seed", 0)),
+            emit_baseline=bool(data.get("emit_baseline", True)),
+            selection=str(data.get("selection", SelectionMode.TOP_K.value)),
+            gate_dict=dict(gate_dict) if gate_dict is not None else None,
+            batch_size=int(data.get("batch_size", DEFAULT_BATCH_SIZE)),
+        )
+
 
 # --------------------------------------------------------------------------------------
 # Result
@@ -351,7 +376,8 @@ class CurationResult:
 
     def build_manifest(self, *, created_utc: str | None = None) -> Manifest:
         """Construct the :class:`Manifest` describing this run (no I/O)."""
-        source_fp = self._require_reader().fingerprint()
+        reader = self._require_reader()
+        source_fp = reader.fingerprint()
         return Manifest(
             schema_version=MANIFEST_SCHEMA_VERSION,
             source=source_fp,
@@ -363,6 +389,7 @@ class CurationResult:
             decisions=self.decisions,
             baseline=self.baseline,
             created_utc=created_utc,
+            parent_manifest_path=_parent_manifest_path(reader),
         )
 
     def scorecard(self) -> Scorecard:
@@ -371,11 +398,20 @@ class CurationResult:
 
         return build_scorecard(self)
 
-    def save(self, dest: str | Path, *, created_utc: str | None = None) -> WriteReceipt:
+    def save(
+        self,
+        dest: str | Path,
+        *,
+        created_utc: str | None = None,
+        write_card: bool = True,
+    ) -> WriteReceipt:
         """Write the curated subset (kept episodes) plus the manifest to ``dest``.
 
         Re-reads the kept episodes from the source reader (streaming; source untouched) and
         writes a new dataset via the writer, which validates schema + checksum + round-trip.
+        When ``write_card`` is set (the default), a ``README.md`` Hugging Face dataset card
+        summarizing the curation is written into ``dest`` alongside the manifest. The source
+        dataset is never touched (Invariant 1).
         """
         from robocurate.adapters.lerobot import LeRobotWriter
 
@@ -384,7 +420,13 @@ class CurationResult:
         writer = LeRobotWriter(dest, source_root=source_root)
         manifest = self.build_manifest(created_utc=created_utc)
         kept = (reader.read_episode(i) for i in self.kept_episode_indices)
-        return writer.write(kept, manifest)
+        receipt = writer.write(kept, manifest)
+        if write_card:
+            from pathlib import Path as _Path
+
+            card = self.scorecard().to_hf_dataset_card()
+            (_Path(receipt.path) / "README.md").write_text(card, encoding="utf-8")
+        return receipt
 
     def _require_reader(self) -> DatasetReader:
         if self._reader is None:
@@ -719,6 +761,23 @@ class Curator:
             gate_dict=self.gate.to_dict() if self.gate else None,
             batch_size=self.batch_size,
         )
+
+
+def _parent_manifest_path(reader: DatasetReader) -> str | None:
+    """Return the source's ``manifest.json`` path if the source is itself a curated dataset.
+
+    Curating an already-curated dataset should record its lineage (Invariant 6: honest,
+    auditable provenance). We detect this purely by reading: a directory-backed reader exposes
+    a ``root`` and, if that root contains a ``manifest.json``, the source was emitted by a
+    prior curation run. The source is only read, never written.
+    """
+    from pathlib import Path
+
+    root = getattr(reader, "root", None)
+    if root is None:
+        return None
+    candidate = Path(root) / "manifest.json"
+    return str(candidate) if candidate.is_file() else None
 
 
 # A fixed stream id mixed with the master seed so the baseline RNG is independent of, but

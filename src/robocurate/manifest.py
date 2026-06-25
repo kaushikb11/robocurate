@@ -105,6 +105,10 @@ class Manifest:
         file_checksums: ``path -> sha256`` for every file written, so integrity is
             verifiable (Invariant 2).
         created_utc: ISO-8601 UTC timestamp the run finished (stamped by the caller).
+        parent_manifest_path: When the source being curated is *itself* a curated dataset
+            (its directory contains a ``manifest.json``), the path to that parent manifest,
+            so a chain of curations is auditable end-to-end. ``None`` for a first-generation
+            curation of un-curated source data.
     """
 
     schema_version: str
@@ -118,6 +122,7 @@ class Manifest:
     baseline: BaselineRecord | None
     file_checksums: Mapping[str, str] = field(default_factory=dict)
     created_utc: str | None = None
+    parent_manifest_path: str | None = None
 
     @property
     def num_removed(self) -> int:
@@ -143,6 +148,7 @@ class Manifest:
             "baseline": self.baseline.to_dict() if self.baseline else None,
             "file_checksums": dict(self.file_checksums),
             "created_utc": self.created_utc,
+            "parent_manifest_path": self.parent_manifest_path,
         }
 
     def to_json(self, *, indent: int = 2) -> str:
