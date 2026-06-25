@@ -26,7 +26,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies (torch extras + maniskill-demos h5py)
-        run: uv sync --extra demo-score --extra influence --extra policy --extra maniskill-demos --dev
+        run: uv sync --frozen --extra demo-score --extra influence --extra policy --extra maniskill-demos --dev
 
       - name: Lint (ruff)
         run: uv run ruff check .
@@ -55,7 +55,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install rlds extra (tensorflow + tfds)
-        run: uv sync --extra rlds --dev
+        run: uv sync --frozen --extra rlds --dev
 
       - name: RLDS tests
         run: uv run pytest tests/test_rlds_adapter.py
@@ -76,7 +76,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install core + dev only (no extras)
-        run: uv sync --dev
+        run: uv sync --frozen --dev
 
       - name: Assert torch is NOT installed
         run: |
