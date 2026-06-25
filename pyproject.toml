@@ -58,7 +58,10 @@ viz = ["matplotlib>=3.5"]
 # Downloading a real LeRobotDataset from the Hub (the v3 reader itself needs only pyarrow,
 # already in core; this extra is only for the optional real-Hub-dataset read test / convenience).
 lerobot = ["huggingface_hub>=0.20"]
-all = ["robocurate[demo-score]", "robocurate[influence]", "robocurate[policy]"]
+# Software CPU video-frame decode (PyAV / libav) for Stage-2 image signals. Pure CPU, no GPU;
+# the core stays decode-free so a low-dim-only install never pulls in libav.
+video = ["av>=12"]
+all = ["robocurate[demo-score]", "robocurate[influence]", "robocurate[policy]", "robocurate[video]"]
 
 [project.urls]
 Homepage = "https://github.com/kaushikb11/robocurate"
@@ -150,4 +153,5 @@ markers = [
     "robomimic: tests that require the robomimic extra (h5py); skipped in the core-only run",
     "viz: tests that require the viz extra (matplotlib); skipped in the core-only run",
     "lerobot: tests that download a real LeRobot Hub dataset (needs huggingface_hub + network); opt-in",
+    "video: tests that require the video extra (av / PyAV); skipped in the core-only run",
 ]
