@@ -26,7 +26,9 @@ classifiers = [
 # Core dependencies must install clean on a laptop with no GPU. NumPy is the canonical
 # exchange type; nothing here pulls in torch.
 dependencies = [
-    "numpy>=1.24",
+    # Cap below 2.3: numpy >=2.3 drops Python 3.10 (which we support per requires-python),
+    # so this keeps a single numpy across the 3.10–3.12 matrix instead of splitting the lock.
+    "numpy>=1.24,<2.3",
     # The LeRobotDataset format stores tabular data as Parquet. PyArrow is a pure CPU
     # wheel (no GPU), so the core still installs clean on a laptop.
     "pyarrow>=15.0",
