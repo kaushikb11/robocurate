@@ -42,6 +42,7 @@ def _run_and_save(
 
     fake_hub = types.ModuleType("huggingface_hub")
     fake_hub.upload_folder = _fake_upload_folder  # type: ignore[attr-defined]
+    fake_hub.create_repo = lambda **kwargs: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
 
     out = tmp_path / "curated"
@@ -102,24 +103,39 @@ def test_maybe_push_passes_output_dir_and_options(
     out = tmp_path / "out"
     out.mkdir()
 
-    calls: list[dict[str, Any]] = []
+    uploads: list[dict[str, Any]] = []
+    creates: list[dict[str, Any]] = []
 
     def _fake_upload_folder(**kwargs: Any) -> None:
-        calls.append(kwargs)
+        uploads.append(kwargs)
+
+    def _fake_create_repo(**kwargs: Any) -> None:
+        creates.append(kwargs)
 
     fake_hub = types.ModuleType("huggingface_hub")
     fake_hub.upload_folder = _fake_upload_folder  # type: ignore[attr-defined]
+    fake_hub.create_repo = _fake_create_repo  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
 
     returned = hub.maybe_push_to_hub(out, "acme/curated", token="t0ken", private=True)
     assert returned == "acme/curated"
-    assert len(calls) == 1
-    kwargs = calls[0]
-    assert Path(kwargs["folder_path"]).resolve() == out.resolve()
-    assert kwargs["repo_id"] == "acme/curated"
-    assert kwargs["repo_type"] == "dataset"
-    assert kwargs["token"] == "t0ken"
-    assert kwargs["private"] is True
+
+    # The repo is created (idempotently) with `private` — that kwarg belongs to create_repo.
+    assert len(creates) == 1
+    assert creates[0]["repo_id"] == "acme/curated"
+    assert creates[0]["repo_type"] == "dataset"
+    assert creates[0]["private"] is True
+    assert creates[0]["exist_ok"] is True
+    assert creates[0]["token"] == "t0ken"
+
+    # The upload targets the output dir and does NOT carry `private`.
+    assert len(uploads) == 1
+    up = uploads[0]
+    assert Path(up["folder_path"]).resolve() == out.resolve()
+    assert up["repo_id"] == "acme/curated"
+    assert up["repo_type"] == "dataset"
+    assert up["token"] == "t0ken"
+    assert "private" not in up
 
 
 @pytest.mark.lerobot

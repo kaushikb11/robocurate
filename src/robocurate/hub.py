@@ -60,16 +60,22 @@ def maybe_push_to_hub(
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch in tests
         raise ImportError(_INSTALL_HINT) from exc
 
-    # Typed as Any at the call boundary: the upstream signature evolves across
-    # huggingface_hub versions, and the visibility (``private``) of a freshly-created repo is
-    # the caller's intent regardless of which kwarg the installed version routes it through.
-    upload_folder: Any = huggingface_hub.upload_folder
-    upload_folder(
+    # Typed as Any at the call boundary: the upstream signatures evolve across versions.
+    # ``private`` applies at repo *creation* time (``create_repo``), not on ``upload_folder``;
+    # creating with ``exist_ok=True`` is idempotent, then we upload the validated output dir.
+    hub_api: Any = huggingface_hub
+    hub_api.create_repo(
+        repo_id=repo_id,
+        repo_type="dataset",
+        private=private,
+        exist_ok=True,
+        token=token,
+    )
+    hub_api.upload_folder(
         folder_path=str(folder),
         repo_id=repo_id,
         repo_type="dataset",
         token=token,
-        private=private,
     )
     return repo_id
 
