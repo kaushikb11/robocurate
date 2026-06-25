@@ -2,7 +2,9 @@
 
 Commands mirror the Python API: ``score`` (report only, no write), ``curate`` (select +
 write a new dataset + manifest), ``baseline`` (emit the equal-N random control), ``report``
-(render a scorecard from a run), and ``diff`` (raw vs curated). Each accepts ``--seed`` and
+(render a scorecard from a run), ``diff`` (raw vs curated), ``list-signals`` (the available
+quality signals), ``validate``/``doctor`` (a read-only dataset health check), and ``explain``
+(one episode's kept/removed decision from a saved manifest). Each accepts ``--seed`` and
 ``--json`` and records enough to reproduce a run from config + seed + code version.
 
 In this skeleton the parser and command wiring are real, but several commands are thin: the
@@ -26,7 +28,7 @@ from robocurate.curator import Budget, Curator
 from robocurate.scorecard import Scorecard
 
 if TYPE_CHECKING:
-    from robocurate.signals.base import Signal
+    from robocurate.signals.base import Signal, SignalSpec
 
 
 def _resolve_signals(names: list[str]) -> list[Signal]:
@@ -108,6 +110,148 @@ def _cmd_report(args: argparse.Namespace) -> int:
         raise SystemExit(f"could not read manifest {path}: {exc}") from exc
     card = Scorecard.from_manifest(manifest)
     print(card.to_json() if args.json else card.to_markdown())
+    return 0
+
+
+# Built-in signals whose optional extra differs from their signal name. Most learned
+# signals install via ``robocurate[<name>]``; these two share an umbrella extra. TIER0_CPU
+# signals need no extra and report "(none)".
+_SIGNAL_EXTRA = {
+    "demo_score": "demo-score",
+    "cupid": "influence",
+}
+
+
+def _signal_extra(spec: SignalSpec) -> str | None:
+    """Return the pip extra a signal needs, or ``None`` for a laptop-friendly Tier-0 signal."""
+    from robocurate.signals.base import CostTier
+
+    if spec.cost_tier is CostTier.TIER0_CPU:
+        return None
+    return _SIGNAL_EXTRA.get(spec.name, spec.name)
+
+
+def _signal_entry(name: str) -> dict[str, Any] | None:
+    """Build the descriptor for one available signal (name, spec fields, required extra).
+
+    Some learned signals import their class successfully (so they appear in ``available()``)
+    but raise at construction when an optional dependency (e.g. PyTorch) is missing. Those are
+    reported with the install hint we can derive from the name rather than dropped or crashed.
+    """
+    try:
+        spec = signals.get(name).spec
+    except ImportError as exc:
+        return {
+            "name": name,
+            "description": f"needs an optional dependency to load ({exc})",
+            "cost_tier": None,
+            "requires": [],
+            "deterministic": None,
+            "extra": _SIGNAL_EXTRA.get(name, name),
+        }
+    return {
+        "name": spec.name,
+        "description": spec.description,
+        "cost_tier": spec.cost_tier.name,
+        "requires": sorted(spec.requires),
+        "deterministic": spec.deterministic,
+        "extra": _signal_extra(spec),
+    }
+
+
+def _cmd_list_signals(args: argparse.Namespace) -> int:
+    """List every loadable signal (plus any that failed to import) — JSON or markdown."""
+    entries = (_signal_entry(name) for name in signals.available())
+    available = [entry for entry in entries if entry is not None]
+    unavailable = signals.unavailable()
+
+    if args.json:
+        print(json.dumps({"available": available, "unavailable": unavailable}))
+        return 0
+
+    lines = ["# Available signals", ""]
+    if not available:
+        lines.append("(no signals registered)")
+    for entry in available:
+        extra = entry["extra"] or "none (Tier-0, CPU)"
+        requires = ", ".join(entry["requires"]) or "—"
+        cost_tier = entry["cost_tier"] or "unknown (dependency missing)"
+        if entry["deterministic"] is None:
+            deterministic = "unknown"
+        else:
+            deterministic = "yes" if entry["deterministic"] else "no"
+        lines += [
+            f"## {entry['name']}",
+            "",
+            f"  {entry['description']}",
+            "",
+            f"  - cost tier:     {cost_tier}",
+            f"  - requires:      {requires}",
+            f"  - deterministic: {deterministic}",
+            f"  - install extra: {extra}",
+            "",
+        ]
+    if unavailable:
+        lines += ["## Unavailable (import failed)", ""]
+        for name, error in sorted(unavailable.items()):
+            lines.append(f"  - {name}: {error}")
+    print("\n".join(lines).rstrip())
+    return 0
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    """Diagnose a source dataset's health (schema, structural defects, coverage). No write."""
+    from robocurate.dataset import Dataset
+    from robocurate.health import dataset_health
+
+    dataset = Dataset.from_lerobot(args.dataset)
+    report = dataset_health(dataset)
+    print(json.dumps(report.to_dict(), indent=2) if args.json else report.to_markdown())
+    return 0
+
+
+def _cmd_explain(args: argparse.Namespace) -> int:
+    """Explain one episode's kept/removed decision from a saved manifest (markdown or JSON)."""
+    path = Path(args.path)
+    if path.is_dir():
+        path = path / "manifest.json"
+    if not path.is_file():
+        raise SystemExit(f"no manifest found at {args.path} (expected a manifest.json file)")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"could not read manifest {path}: {exc}") from exc
+
+    decisions = manifest.get("decisions", [])
+    match = next((d for d in decisions if d.get("episode_index") == args.episode_index), None)
+    if match is None:
+        known = ", ".join(str(d.get("episode_index")) for d in decisions) or "<none>"
+        raise SystemExit(
+            f"episode {args.episode_index} not found in {path}; episodes present: {known}"
+        )
+
+    if args.json:
+        print(json.dumps(match))
+        return 0
+
+    status = "KEPT" if match.get("kept") else "REMOVED"
+    fingerprint = str(match.get("fingerprint", ""))
+    lines = [
+        f"# Episode {match.get('episode_index')}: {status}",
+        "",
+        f"- fingerprint: {fingerprint[:12] or '(none)'}",
+        f"- reason: {match.get('reason', '(no reason recorded)')}",
+        "",
+        "## Per-signal values",
+        "",
+    ]
+    signal_values = match.get("signal_values") or {}
+    if signal_values:
+        for name, value in signal_values.items():
+            lines.append(f"  - {name}: {value}")
+    else:
+        lines.append("  (no per-signal values recorded)")
+    print("\n".join(lines))
     return 0
 
 
@@ -209,6 +353,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("curated", help="curated dataset path.")
     add_common(p_diff)
     p_diff.set_defaults(func=_cmd_diff)
+
+    p_list = sub.add_parser("list-signals", help="list the available quality signals.")
+    add_common(p_list)
+    p_list.set_defaults(func=_cmd_list_signals)
+
+    p_validate = sub.add_parser(
+        "validate",
+        aliases=["doctor"],
+        help="diagnose a dataset's health (schema, structural defects, coverage). No write.",
+    )
+    p_validate.add_argument("dataset", help="path to a LeRobotDataset directory.")
+    add_common(p_validate)
+    p_validate.set_defaults(func=_cmd_validate)
+
+    p_explain = sub.add_parser(
+        "explain", help="explain one episode's kept/removed decision from a saved manifest."
+    )
+    p_explain.add_argument("path", help="path to a manifest or curated dataset.")
+    p_explain.add_argument("episode_index", type=int, help="the source episode index to explain.")
+    add_common(p_explain)
+    p_explain.set_defaults(func=_cmd_explain)
 
     return parser
 
