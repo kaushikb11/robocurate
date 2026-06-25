@@ -58,6 +58,7 @@ FeatureRequirement = frozenset[str]
 REQUIRES_GPU = "gpu"
 REQUIRES_SIM_STATE = "sim_state"
 REQUIRES_ENCODER = "encoder"
+REQUIRES_IMAGE = "image"  # the trajectory must carry decodable image/video frames
 
 
 @dataclass(frozen=True)

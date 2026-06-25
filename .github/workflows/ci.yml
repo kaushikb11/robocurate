@@ -25,8 +25,8 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies (torch extras + maniskill-demos h5py)
-        run: uv sync --frozen --extra demo-score --extra influence --extra policy --extra maniskill-demos --dev
+      - name: Install dependencies (torch extras + maniskill-demos h5py + video PyAV)
+        run: uv sync --frozen --extra demo-score --extra influence --extra policy --extra maniskill-demos --extra video --dev
 
       - name: Lint (ruff)
         run: uv run ruff check .

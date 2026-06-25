@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   image/video frame data through curation (the kept episodes' frames survive the round trip).
 - **`structural_validity` signal** — flags truncation / stall / non-finite defects the
   geometric signals miss (the 9th built-in signal).
+- **Three CPU image-quality signals** (behind the `video` extra) — `image_blur`
+  (variance-of-Laplacian sharpness severity), `visual_stall` (fraction of adjacent frame pairs
+  with a frozen camera, the image-space analogue of the structural stall check), and
+  `visual_diversity` (image-space near-duplicate detection via k-NN distance in a cheap CPU
+  appearance embedding). They decode frames on CPU via PyAV, advertise a `REQUIRES_IMAGE`
+  requirement, and skip gracefully (recorded, never silent) on episodes without decodable video.
 - **Sim-free held-out BC-loss evaluator** — a CPU-only downstream cross-check of the curation.
 - **CLI `list-signals`, `validate` (alias `doctor`), and `explain`** — list every loadable
   quality signal and its install extra; run a read-only dataset health check (schema,

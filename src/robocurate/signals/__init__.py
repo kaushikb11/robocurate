@@ -5,10 +5,12 @@ types — :class:`SignalContext`, :class:`TrajectoryScore`, :class:`FeatureRequi
 caches, cost tiers), the entry-point *registry* (:func:`get`, :func:`available`,
 :func:`register`), and the built-in signal classes.
 
-Nine built-in signals ship today: :class:`Jerk`, :class:`ActionNoise`,
+Twelve built-in signals ship today: :class:`Jerk`, :class:`ActionNoise`,
 :class:`PathEfficiency`, :class:`SpectralSmoothness`, :class:`Redundancy`,
-:class:`StructuralValidity`, :class:`SimPhysicsValidity`, :class:`DemoScore`, and
-:class:`Cupid`. Each one registers through the ``robocurate.signals`` entry-point group
+:class:`StructuralValidity`, :class:`SimPhysicsValidity`, :class:`DemoScore`,
+:class:`Cupid`, and the CPU image-quality trio :class:`ImageBlur`, :class:`VisualStall`,
+and :class:`VisualDiversity` (behind the ``video`` extra). Each one registers through the
+``robocurate.signals`` entry-point group
 declared in ``pyproject.toml`` — exactly the mechanism a third-party signal uses — so adding a
 signal never touches the core.
 
@@ -26,6 +28,7 @@ from robocurate.signals.action_noise import ActionNoise
 from robocurate.signals.base import (
     REQUIRES_ENCODER,
     REQUIRES_GPU,
+    REQUIRES_IMAGE,
     REQUIRES_SIM_STATE,
     CacheHandle,
     CostTier,
@@ -39,6 +42,7 @@ from robocurate.signals.base import (
 )
 from robocurate.signals.cupid import Cupid
 from robocurate.signals.demo_score import DemoScore
+from robocurate.signals.image_blur import ImageBlur
 from robocurate.signals.jerk import Jerk
 from robocurate.signals.path_efficiency import PathEfficiency
 from robocurate.signals.redundancy import Redundancy, statistical_embedding
@@ -52,10 +56,13 @@ from robocurate.signals.registry import (
 from robocurate.signals.sim_validity import SimPhysicsValidity
 from robocurate.signals.spectral_smoothness import SpectralSmoothness
 from robocurate.signals.structural_validity import StructuralValidity
+from robocurate.signals.visual_diversity import VisualDiversity
+from robocurate.signals.visual_stall import VisualStall
 
 __all__ = [
     "REQUIRES_ENCODER",
     "REQUIRES_GPU",
+    "REQUIRES_IMAGE",
     "REQUIRES_SIM_STATE",
     "ActionNoise",
     "CacheHandle",
@@ -63,6 +70,7 @@ __all__ = [
     "Cupid",
     "DemoScore",
     "FeatureRequirement",
+    "ImageBlur",
     "InMemoryCache",
     "Jerk",
     "NamespacedCache",
@@ -75,6 +83,8 @@ __all__ = [
     "SpectralSmoothness",
     "StructuralValidity",
     "TrajectoryScore",
+    "VisualDiversity",
+    "VisualStall",
     "available",
     "get",
     "register",

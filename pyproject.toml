@@ -84,6 +84,9 @@ structural_validity = "robocurate.signals.structural_validity:StructuralValidity
 sim_physics_validity = "robocurate.signals.sim_validity:SimPhysicsValidity"
 demo_score = "robocurate.signals.demo_score:DemoScore"
 cupid = "robocurate.signals.cupid:Cupid"
+image_blur = "robocurate.signals.image_blur:ImageBlur"
+visual_stall = "robocurate.signals.visual_stall:VisualStall"
+visual_diversity = "robocurate.signals.visual_diversity:VisualDiversity"
 
 [dependency-groups]
 dev = [

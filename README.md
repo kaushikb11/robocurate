@@ -40,11 +40,14 @@ The full strategy, the honest competitive picture, and where we're weak today ar
 
 - **Frozen core abstractions** — canonical trajectory, `Signal` protocol, adapters,
   curator, scorecard. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-- **Nine quality signals** (Tier 0→2): jerk, action-noise, path-efficiency (directness),
+- **Twelve quality signals** (Tier 0→2): jerk, action-noise, path-efficiency (directness),
   spectral-smoothness (SPARC — spectral arc length), redundancy, structural-validity
   (truncation / stall / non-finite — the *structural* defects the geometric signals miss),
-  sim physics-validity, a Demo-SCORE-inspired classifier, and CUPID-inspired proxy-influence.
-  The cheap heuristic signals need only NumPy + PyArrow; the learned two live behind extras.
+  sim physics-validity, a Demo-SCORE-inspired classifier, CUPID-inspired proxy-influence, and
+  three CPU image-quality signals — image-blur (variance-of-Laplacian sharpness), visual-stall
+  (a frozen camera), and visual-diversity (image-space near-duplicate detection). The cheap
+  heuristic signals need only NumPy + PyArrow; the learned two live behind extras, and the
+  image trio behind the `video` extra (PyAV, CPU-only decode).
 - **Honest self-checks you can run** — a known-answer corruption study (we inject defects we
   control and report each signal's blind spots — e.g. directness/smoothness *invert* on a
   truncated demo, which `structural-validity` then catches) and a sim-free held-out
