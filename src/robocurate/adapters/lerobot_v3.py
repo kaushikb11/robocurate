@@ -18,9 +18,15 @@ are *global* (concatenation) offsets, not per-file ones.
 
 Scope (v1): low-dim features (state/action/reward/timestamp + bookkeeping) read with **pyarrow +
 json only** — no torch, no ``lerobot``, no GPU. Video features (``dtype: "video"``) are recorded
-in ``meta.extra["video_features"]`` but their pixels are not decoded; full frame decode lands
-behind an optional extra later. The reader has no write method, so the source is read-only by
-construction (invariant 1).
+in ``meta.extra["video_features"]`` but their pixels are not decoded.
+
+Stage-1 image/video pass-through: for each episode the reader also builds per-camera shard
+**references** (:class:`~robocurate.trajectory.VideoReference`: frame indices + the mp4 shard path
++ the episode's timestamp slice) and carries them in ``meta.extra["video_references"]`` so the v3
+writer can *copy* the kept episodes' video shard files without ever decoding pixels. Video features
+are deliberately kept out of the embodiment/parquet feature table (their pixels live in mp4 shards);
+full frame decode lands behind an optional extra later. The reader has no write method, so the
+source is read-only by construction (invariant 1).
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
@@ -46,6 +53,7 @@ from robocurate.trajectory import (
     SuccessLabel,
     Trajectory,
     TrajectoryMeta,
+    VideoReference,
     fingerprint_arrays,
 )
 
@@ -75,9 +83,19 @@ class LeRobotReaderV3:
         self.dataset_id = dataset_id or str(self.root)
         self._info = self._load_info()
         self._data_path_tmpl: str = self._info["data_path"]
+        # The video shard path template (e.g. "videos/{video_key}/chunk-{chunk_index:03d}/
+        # file-{file_index:03d}.mp4"). May be absent on a low-dim-only dataset; then video shard
+        # files cannot be located and references carry shard_path=None.
+        self._video_path_tmpl: str | None = self._info.get("video_path")
         self._video_keys = tuple(
             k for k, s in self._info.get("features", {}).items() if _is_video_feature(k, s)
         )
+        # The raw v3 feature-spec dict for each video key (dtype/shape/names/video metadata),
+        # preserved verbatim so the writer can re-emit faithful video feature specs in the
+        # curated output's info.json without re-reading the source.
+        self._video_feature_specs: dict[str, dict[str, Any]] = {
+            k: dict(self._info["features"][k]) for k in self._video_keys
+        }
         self._episodes = self._load_episodes()
         self._embodiment = self._build_embodiment()
         self.meta = self._build_meta()
@@ -187,6 +205,13 @@ class LeRobotReaderV3:
         for spec in self._embodiment.features:
             columns[spec.key] = _arrow_column_to_array(rows.column(spec.key), spec)
 
+        # Stage-1 image/video pass-through: build per-camera shard *references* (frame indices +
+        # mp4 shard path, never pixels) from the relational episode row, and carry them in
+        # meta.extra so the writer can copy the kept episodes' video shard files. Video features
+        # stay out of the embodiment/parquet feature table (v3 keeps pixels in mp4 shards), and
+        # references are excluded from the content fingerprint (no pixels are loaded or modified).
+        video_refs = self._build_video_references(record, num_frames=rows.num_rows)
+
         meta = TrajectoryMeta(
             source_dataset_id=self.dataset_id,
             episode_index=index,
@@ -195,9 +220,51 @@ class LeRobotReaderV3:
             num_steps=rows.num_rows,
             source_format="lerobot_v3",
             success=self._read_success(columns),
-            extra={"tasks": record.get("tasks", []), "video_features": list(self._video_keys)},
+            extra={
+                "tasks": record.get("tasks", []),
+                "video_features": list(self._video_keys),
+                "video_feature_specs": self._video_feature_specs,
+                "video_references": video_refs,
+            },
         )
         return Trajectory(meta, InMemoryFeatureStore(columns))
+
+    def _build_video_references(
+        self, record: dict[str, Any], *, num_frames: int
+    ) -> dict[str, VideoReference]:
+        """Build a ``{video_key: VideoReference}`` mapping for one episode (no pixels decoded).
+
+        Each reference records the per-camera mp4 shard the episode's frames live in — resolved
+        from the relational episode row's ``videos/<key>/chunk_index`` + ``file_index`` columns
+        and the ``video_path`` template — plus the episode-local frame indices ``0..T-1`` and the
+        episode's ``from_timestamp``/``to_timestamp`` slice within that (possibly multi-episode)
+        shard. ``shard_path`` is ``None`` when the dataset exposes no ``video_path`` template or
+        the row omits the shard indices (the reference is then opaque but still preserved).
+        """
+        refs: dict[str, VideoReference] = {}
+        frame_indices = np.arange(num_frames, dtype=np.int64)
+        for key in self._video_keys:
+            chunk = record.get(f"videos/{key}/chunk_index")
+            file = record.get(f"videos/{key}/file_index")
+            shard_path: Path | None = None
+            chunk_index: int | None = None if chunk is None else int(chunk)
+            file_index: int | None = None if file is None else int(file)
+            have_indices = chunk_index is not None and file_index is not None
+            if self._video_path_tmpl is not None and have_indices:
+                shard_path = self.root / self._video_path_tmpl.format(
+                    video_key=key, chunk_index=chunk_index, file_index=file_index
+                )
+            refs[key] = VideoReference(
+                video_key=key,
+                num_frames=num_frames,
+                frame_indices=frame_indices,
+                shard_path=shard_path,
+                shard_chunk_index=chunk_index,
+                shard_file_index=file_index,
+                from_timestamp=record.get(f"videos/{key}/from_timestamp"),
+                to_timestamp=record.get(f"videos/{key}/to_timestamp"),
+            )
+        return refs
 
     def _read_success(self, columns: dict[str, Array]) -> SuccessLabel | None:
         """Reconstruct an episode :class:`SuccessLabel` from a SUCCESS-role column, if any.

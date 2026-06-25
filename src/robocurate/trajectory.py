@@ -36,7 +36,8 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from pathlib import Path
+from typing import Any, Protocol, cast, runtime_checkable
 
 import numpy as np
 import numpy.typing as npt
@@ -47,18 +48,64 @@ import numpy.typing as npt
 Array = npt.NDArray[np.generic]
 
 
-def fingerprint_arrays(columns: Mapping[str, Array]) -> str:
+@dataclass(frozen=True)
+class VideoReference:
+    """A *reference* to one camera's video frames for a single episode — never the pixels.
+
+    Stage-1 image/video pass-through preserves frames without decoding them: an IMAGE-role
+    feature is materialized as this lightweight reference rather than a ``(T, H, W, C)`` pixel
+    array. It records exactly where the episode's frames live so a writer can **copy** the
+    backing shard file(s) into a curated output and a reader can later (Stage 2) decode them.
+
+    A v3 video shard may bundle multiple episodes; ``from_timestamp`` / ``to_timestamp`` mark
+    this episode's slice within ``shard_path``. Stage-1 copies the whole shard file(s) any kept
+    episode references and keeps these references consistent, so no pixels are touched.
+
+    Attributes:
+        video_key: The source feature key, e.g. ``"observation.images.wrist"``.
+        num_frames: ``T`` — the number of frames this episode contributes (one per timestep).
+        frame_indices: The episode-local ``(T,)`` frame indices ``0..T-1`` (an int array; the
+            only array carried, and it is *bookkeeping*, not pixels). ``None`` if unknown.
+        shard_path: Absolute path to the backing mp4 shard file holding these frames, or
+            ``None`` when the source did not expose one (the reference is then opaque).
+        shard_chunk_index: The shard's ``chunk_index`` (the ``chunk-NNN`` directory), or ``None``.
+        shard_file_index: The shard's ``file_index`` (the ``file-NNN`` stem), or ``None``.
+        from_timestamp: Start time (seconds) of this episode's frames within ``shard_path``.
+        to_timestamp: End time (seconds) of this episode's frames within ``shard_path``.
+    """
+
+    video_key: str
+    num_frames: int
+    frame_indices: Array | None = None
+    shard_path: Path | None = None
+    shard_chunk_index: int | None = None
+    shard_file_index: int | None = None
+    from_timestamp: float | None = None
+    to_timestamp: float | None = None
+
+
+def fingerprint_arrays(columns: Mapping[str, Array | VideoReference]) -> str:
     """Return a stable content hash over a set of feature arrays.
 
     The hash is order-independent in the input mapping (keys are sorted) and covers both
     the key names and the raw array bytes, so two trajectories with identical content
     produce the same fingerprint. Used for reproducibility, manifest linkage, and dedup, and
     shared by adapters and fixtures so a round-tripped trajectory keeps its fingerprint.
+
+    Image/video pixels are never loaded in Stage-1 pass-through, so a column whose value is a
+    :class:`VideoReference` (a per-camera shard *reference*, not pixels) is **excluded** from
+    the content hash: there is no pixel array to call ``.tobytes()`` on, and the curated output
+    preserves the very same frames byte-for-byte (the writer copies the shard files), so the
+    low-dim content hash is the correct, stable identity. Hashing only the low-dim arrays keeps
+    the fingerprint reproducible across the read -> curate -> reload round-trip.
     """
     hasher = hashlib.sha256()
     for key in sorted(columns):
+        value = columns[key]
+        if isinstance(value, VideoReference):
+            continue  # pixels are never materialized; references are not part of the content hash
         hasher.update(key.encode("utf-8"))
-        hasher.update(np.ascontiguousarray(columns[key]).tobytes())
+        hasher.update(np.ascontiguousarray(value).tobytes())
     return hasher.hexdigest()
 
 
@@ -205,6 +252,13 @@ class FeatureStore(Protocol):
     def read(self, key: str) -> Array:
         """Materialize and return the ``(T, *shape)`` array for ``key``.
 
+        For a low-dim feature this is the ``(T, *shape)`` array. For an IMAGE-role video feature
+        under Stage-1 pass-through the store instead holds a :class:`VideoReference` (frame
+        references, never decoded pixels); the typed return is still :data:`Array` so the
+        low-dim signal path stays statically typed, and :meth:`Trajectory.video_references`
+        recovers the references for image keys. Callers must not request an image key through the
+        array path and treat the result as pixels.
+
         Raises:
             KeyError: If ``key`` is not present in this store.
         """
@@ -212,24 +266,29 @@ class FeatureStore(Protocol):
 
 
 class InMemoryFeatureStore:
-    """A :class:`FeatureStore` backed by an in-memory mapping of arrays.
+    """A :class:`FeatureStore` backed by an in-memory mapping of feature values.
 
+    Values are low-dim arrays for ordinary features and :class:`VideoReference` objects for
+    IMAGE-role video features under Stage-1 pass-through (pixels are never held in memory).
     Used for synthetic test fixtures and small datasets. Real adapters supply lazy,
     memory-mapped or decode-on-demand stores instead.
     """
 
-    def __init__(self, columns: Mapping[str, Array]) -> None:
+    def __init__(self, columns: Mapping[str, Array | VideoReference]) -> None:
         # Copy into a plain dict so the store owns its mapping and callers cannot mutate it
         # underneath us; arrays themselves are not copied (cheap, and they are read-only by
         # convention on the source path).
-        self._columns: dict[str, Array] = dict(columns)
+        self._columns: dict[str, Array | VideoReference] = dict(columns)
 
     def has(self, key: str) -> bool:
         return key in self._columns
 
     def read(self, key: str) -> Array:
+        # The stored value is an Array for low-dim features and a VideoReference for IMAGE keys
+        # (Stage-1 pass-through). The typed return is Array to keep the low-dim signal path
+        # statically typed; image keys are recovered via Trajectory.video_references().
         try:
-            return self._columns[key]
+            return cast("Array", self._columns[key])
         except KeyError as exc:
             raise KeyError(f"feature {key!r} not present in store") from exc
 
@@ -270,9 +329,13 @@ class Trajectory:
     def feature(self, key: str) -> Array:
         """Materialize and return the ``(T, *shape)`` array for feature ``key``.
 
-        This is the one uniform accessor signals use for images, state, proprio, actions,
-        rewards — anything. Units and per-dim names come from
-        ``self.embodiment.feature(key)``.
+        This is the one uniform accessor signals use for state, proprio, actions, rewards —
+        anything low-dim. For an IMAGE-role video feature under Stage-1 pass-through the store
+        instead holds a :class:`VideoReference` (frame references, *not* decoded pixels). The
+        typed return stays :data:`Array` so the low-dim signal path remains statically typed and
+        no existing signal changes; image-role features are recovered as references through
+        :meth:`video_references`, not through this array accessor. Units and per-dim names come
+        from ``self.embodiment.feature(key)``.
 
         Raises:
             KeyError: If ``key`` is not present on this trajectory.
@@ -280,15 +343,46 @@ class Trajectory:
         return self._store.read(key)
 
     def select_roles(self, *roles: FeatureRole) -> dict[str, Array]:
-        """Materialize all available features whose role is in ``roles``.
+        """Materialize all available low-dim features whose role is in ``roles``.
 
-        Returns a mapping from key to array. Keys declared in the embodiment but absent
-        from the store are skipped (a trajectory need not carry every declared feature).
+        Returns a mapping from key to array. Keys declared in the embodiment but absent from the
+        store are skipped (a trajectory need not carry every declared feature). For IMAGE-role
+        features use :meth:`video_references` instead — those carry :class:`VideoReference`
+        objects, not arrays, and are not returned through this array-typed accessor.
         """
         out: dict[str, Array] = {}
         for key in self.embodiment.keys_with_role(*roles):
             if self._store.has(key):
                 out[key] = self._store.read(key)
+        return out
+
+    def video_references(self) -> dict[str, VideoReference]:
+        """Return the :class:`VideoReference` for every IMAGE-role feature on this trajectory.
+
+        Stage-1 only: the values are per-camera shard references, never pixels. Used by the v3
+        writer to copy kept episodes' video shard files. Empty when the trajectory carries no
+        video.
+
+        References are resolved from two complementary sources, in order:
+
+        * ``meta.extra["video_references"]`` — a ``{video_key: VideoReference}`` mapping the
+          adapter attaches. The v3 reader uses this because v3 keeps video out of the parquet
+          feature table (so video keys are intentionally *not* in :attr:`embodiment`).
+        * any IMAGE-role feature whose store value is a :class:`VideoReference` — the in-store
+          path for adapters that do carry image features in the embodiment.
+        """
+        out: dict[str, VideoReference] = {}
+        extra_refs = self.meta.extra.get("video_references")
+        if isinstance(extra_refs, Mapping):
+            for key, ref in extra_refs.items():
+                if isinstance(ref, VideoReference):
+                    out[str(key)] = ref
+        for key in self.embodiment.keys_with_role(FeatureRole.IMAGE):
+            if key in out or not self._store.has(key):
+                continue
+            value: object = self._store.read(key)
+            if isinstance(value, VideoReference):
+                out[key] = value
         return out
 
     # -- typed convenience views (return None when absent; never fabricate) ----------

@@ -11,13 +11,24 @@ longer silently downgrades it. Layout written (single-shard is valid — the v3 
     <dest>/data/chunk-000/file-000.parquet           # one ROW per FRAME, all episodes concatenated
     <dest>/manifest.json                             # auditable kept/removed record
 
-Scope (v1, **low-dim curation**): scalar and 1-D features (action, state/proprio, reward,
-timestamp, ...) plus the five v3 bookkeeping columns the reader/spec expect
-(``timestamp``/``frame_index``/``episode_index``/``index``/``task_index``). **Video / image-role
-features are NOT persisted** — their pixels live in mp4 shards we do not write — so the curated
-output is a low-dim dataset. The round-trip guarantee is therefore over the low-dim columns the
-writer actually writes (the same columns :class:`~robocurate.adapters.lerobot_v3.LeRobotReaderV3`
-reads back).
+Scope (v1, **low-dim curation + Stage-1 image/video pass-through**): scalar and 1-D features
+(action, state/proprio, reward, timestamp, ...) plus the five v3 bookkeeping columns the
+reader/spec expect (``timestamp``/``frame_index``/``episode_index``/``index``/``task_index``) are
+written as parquet exactly as before. **Image/video pixels are never decoded.** Instead, for the
+kept episodes the writer **copies** the backing per-camera mp4 shard files (located via the source
+:class:`~robocurate.trajectory.VideoReference`\\ s on each trajectory) into the output ``videos/``
+tree, checksums each copied file against its source (invariant 2), and re-emits the video feature
+specs + ``video_path`` template in ``info.json`` so the output reloads as a valid v3 dataset that
+*preserves the kept frames* (Stage 2 will decode/curate pixels).
+
+**What gets copied (shard granularity):** a v3 mp4 shard may bundle several episodes. Stage-1 copies
+the *whole* shard file that any kept episode references, byte-for-byte, and preserves the source
+``chunk_index``/``file_index`` and ``from_timestamp``/``to_timestamp`` in the output episode
+metadata so frame/timestamp indexing stays consistent. The output is therefore not re-sharded:
+copied shards may still contain frames from episodes that were dropped (those frames are simply not
+indexed by any output episode). The low-dim round-trip guarantee is unchanged (over the persisted
+parquet columns); the video guarantee is that each referenced source shard is present in the output,
+byte-identical.
 
 Like the v2.1 writer: the destination must not exist and must not overlap the source (invariant 1);
 every write finishes with schema + checksum + round-trip validation and any failure quarantines the
@@ -27,6 +38,7 @@ output is a fresh dataset.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from collections.abc import Iterable
@@ -49,7 +61,7 @@ from robocurate.adapters.lerobot import (
     _checksum_tree,
     _is_image_key,
 )
-from robocurate.adapters.lerobot_v3 import CODEBASE_VERSION, LeRobotReaderV3
+from robocurate.adapters.lerobot_v3 import CODEBASE_VERSION, LeRobotReaderV3, _is_video_feature
 from robocurate.manifest import Manifest
 from robocurate.trajectory import (
     Array,
@@ -57,6 +69,7 @@ from robocurate.trajectory import (
     FeatureRole,
     FeatureSpec,
     Trajectory,
+    VideoReference,
     fingerprint_arrays,
 )
 
@@ -73,6 +86,15 @@ _BOOKKEEPING_FEATURES: dict[str, dict[str, Any]] = {
     "index": {"dtype": "int64", "shape": [1], "names": None},
     "task_index": {"dtype": "int64", "shape": [1], "names": None},
 }
+
+
+def _sha256_file(path: Path) -> str:
+    """Return the sha256 of a file's bytes (chunked, so large mp4 shards stream)."""
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
 
 
 def _data_file(root: Path) -> Path:
@@ -144,16 +166,20 @@ class LeRobotWriterV3(DatasetWriter):
 
         expected_fingerprints: list[str] = []
         try:
-            embodiment, episode_records, data_table, tasks = self._build(
+            embodiment, episode_records, data_table, tasks, video_specs, episode_refs = self._build(
                 trajectories, expected_fingerprints
             )
             self._write_data(data_table)
-            self._write_meta(embodiment, episode_records, tasks)
+            # Stage-1 image/video pass-through: copy each referenced source mp4 shard into the
+            # output videos/ tree and checksum it against the source (invariant 2). This mutates
+            # episode_records in place to carry the per-key shard indices + timestamp slice.
+            copied_video_checksums = self._copy_videos(episode_records, episode_refs)
+            self._write_meta(embodiment, episode_records, tasks, video_specs)
             manifest_path = self.dest / "manifest.json"
 
             report = self.validate(self.dest)
             report.raise_if_invalid()
-            self._assert_roundtrip(expected_fingerprints)
+            self._assert_roundtrip(expected_fingerprints, copied_video_checksums)
 
             checksums = _checksum_tree(self.dest)
             fingerprint = LeRobotReaderV3(self.dest).fingerprint()
@@ -207,8 +233,12 @@ class LeRobotWriterV3(DatasetWriter):
         table = pq.read_table(data_path)  # type: ignore[no-untyped-call]
         checked.append(str(data_path.relative_to(path)))
         cols = set(table.column_names)
-        feature_keys = list(info.get("features", {}))
-        for key in feature_keys:
+        all_features: dict[str, dict[str, Any]] = info.get("features", {})
+        # Low-dim features are parquet columns; video features live in mp4 shards, not the table.
+        video_keys = [k for k, s in all_features.items() if _is_video_feature(k, s)]
+        for key in all_features:
+            if key in video_keys:
+                continue
             if key not in cols:
                 errors.append(f"data shard missing feature column {key!r}")
         for key in _BOOKKEEPING_FEATURES:
@@ -220,23 +250,61 @@ class LeRobotWriterV3(DatasetWriter):
                 f"data shard has {table.num_rows} frames but info.json declares "
                 f"total_frames={declared_frames}"
             )
+        # Stage-1 video pass-through: every shard a kept episode references must exist on disk.
+        errors.extend(self._validate_video_shards(path, info, records, video_keys))
         return ValidationReport(ok=not errors, errors=tuple(errors), checked_files=tuple(checked))
+
+    @staticmethod
+    def _validate_video_shards(
+        path: Path,
+        info: dict[str, Any],
+        records: list[dict[str, Any]],
+        video_keys: list[str],
+    ) -> list[str]:
+        """Check that every per-episode video shard declared in the metadata exists on disk."""
+        errors: list[str] = []
+        tmpl = info.get("video_path")
+        if not video_keys or tmpl is None:
+            return errors
+        for record in records:
+            for key in video_keys:
+                chunk = record.get(f"videos/{key}/chunk_index")
+                file = record.get(f"videos/{key}/file_index")
+                if chunk is None or file is None:
+                    continue  # episode declares no shard for this camera (opaque/low-dim source)
+                shard = path / str(tmpl).format(
+                    video_key=key, chunk_index=int(chunk), file_index=int(file)
+                )
+                if not shard.is_file():
+                    errors.append(f"declared video shard missing from output: {shard}")
+        return errors
 
     # -- internals -------------------------------------------------------------------
 
     def _build(
         self, trajectories: Iterable[Trajectory], expected_fingerprints: list[str]
-    ) -> tuple[EmbodimentSpec, list[dict[str, Any]], pa.Table, list[str]]:
+    ) -> tuple[
+        EmbodimentSpec,
+        list[dict[str, Any]],
+        pa.Table,
+        list[str],
+        dict[str, dict[str, Any]],
+        list[dict[str, VideoReference]],
+    ]:
         """Build the concatenated data table + episode metadata + task list in one pass.
 
         Re-indexes kept episodes ``0..k-1`` and accumulates a global frame counter. Records, per
         episode, the fingerprint of exactly the columns the reader will reconstruct, so the
-        round-trip check compares like with like.
+        round-trip check compares like with like. Also collects, per episode, the IMAGE-role
+        :class:`VideoReference`\\ s (for Stage-1 shard copying) and the union of video feature
+        specs (re-emitted into ``info.json``), both gathered without touching any pixels.
         """
         embodiment: EmbodimentSpec | None = None
         episode_records: list[dict[str, Any]] = []
         sub_tables: list[pa.Table] = []
         task_to_index: dict[str, int] = {}
+        video_specs: dict[str, dict[str, Any]] = {}
+        episode_refs: list[dict[str, VideoReference]] = []
         global_index = 0
 
         for out_index, traj in enumerate(trajectories):
@@ -258,13 +326,30 @@ class LeRobotWriterV3(DatasetWriter):
                     "tasks": tasks,
                 }
             )
+            episode_refs.append(traj.video_references())
+            self._merge_video_specs(traj, video_specs)
             global_index += traj.num_steps
 
         if embodiment is None:
             raise ValueError("cannot write an empty dataset (no trajectories provided)")
         data_table = pa.concat_tables(sub_tables) if sub_tables else pa.table({})
         ordered_tasks = sorted(task_to_index, key=lambda t: task_to_index[t])
-        return embodiment, episode_records, data_table, ordered_tasks
+        return embodiment, episode_records, data_table, ordered_tasks, video_specs, episode_refs
+
+    @staticmethod
+    def _merge_video_specs(traj: Trajectory, video_specs: dict[str, dict[str, Any]]) -> None:
+        """Accumulate the source video feature spec dicts (dtype/shape/...) for ``info.json``.
+
+        Sourced from ``meta.extra["video_feature_specs"]`` (attached by the v3 reader). Falls back
+        to a minimal ``{"dtype": "video", ...}`` spec for any video key lacking an explicit spec so
+        the output still declares the feature.
+        """
+        specs = traj.meta.extra.get("video_feature_specs", {})
+        for key in traj.video_references():
+            if key in video_specs:
+                continue
+            spec = specs.get(key) if isinstance(specs, dict) else None
+            video_specs[key] = dict(spec) if isinstance(spec, dict) else {"dtype": "video"}
 
     @staticmethod
     def _task_index(tasks: list[str], task_to_index: dict[str, int]) -> int:
@@ -328,11 +413,67 @@ class LeRobotWriterV3(DatasetWriter):
     def _write_data(self, data_table: pa.Table) -> None:
         pq.write_table(data_table, _data_file(self.dest))  # type: ignore[no-untyped-call]
 
+    def _copy_videos(
+        self,
+        episode_records: list[dict[str, Any]],
+        episode_refs: list[dict[str, VideoReference]],
+    ) -> dict[str, str]:
+        """Copy each referenced source mp4 shard into the output and checksum it (invariant 2).
+
+        For every (video_key, chunk_index, file_index) any kept episode references, the *whole*
+        source shard file is copied to the same ``videos/<key>/chunk-NNN/file-NNN.mp4`` path under
+        the output (preserving indices/timestamps so frame indexing stays consistent — see the
+        module docstring on shard granularity). Each copy is verified to be byte-identical to its
+        source via sha256. Per-key shard indices + timestamp slice are written into
+        ``episode_records`` so the output reloads with consistent references.
+
+        Returns ``{output-relative-path: sha256}`` for every copied shard (used by the round-trip
+        assertion). A reference with no resolvable ``shard_path`` (opaque, e.g. a low-dim-only
+        source) is skipped — it has no file to copy and writes no shard columns.
+
+        Never mutates the source: the source shard is only read; the destination is a fresh copy.
+        """
+        copied: dict[str, str] = {}  # output-relative path -> sha256 (one entry per unique shard)
+        for record, refs in zip(episode_records, episode_refs, strict=True):
+            for key, ref in refs.items():
+                if (
+                    ref.shard_path is None
+                    or ref.shard_chunk_index is None
+                    or ref.shard_file_index is None
+                ):
+                    continue
+                rel = _VIDEO_TMPL.format(
+                    video_key=key,
+                    chunk_index=ref.shard_chunk_index,
+                    file_index=ref.shard_file_index,
+                )
+                dest_path = self.dest / rel
+                if rel not in copied:
+                    self._copy_one_shard(ref.shard_path, dest_path)
+                    copied[rel] = _sha256_file(dest_path)
+                # Record the shard reference on this episode (preserve source indices/timestamps).
+                record[f"videos/{key}/chunk_index"] = ref.shard_chunk_index
+                record[f"videos/{key}/file_index"] = ref.shard_file_index
+                record[f"videos/{key}/from_timestamp"] = ref.from_timestamp
+                record[f"videos/{key}/to_timestamp"] = ref.to_timestamp
+        return copied
+
+    @staticmethod
+    def _copy_one_shard(source: Path, dest: Path) -> None:
+        """Copy one mp4 shard byte-for-byte and verify the copy matches the source (invariant 2)."""
+        if not source.is_file():
+            raise ValidationError(f"video shard missing at source: {source}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)  # copy, never move — the source is read-only (invariant 1)
+        if _sha256_file(dest) != _sha256_file(source):
+            raise ValidationError(f"copied video shard {dest} does not match source {source}")
+
     def _write_meta(
         self,
         embodiment: EmbodimentSpec,
         episode_records: list[dict[str, Any]],
         tasks: list[str],
+        video_specs: dict[str, dict[str, Any]],
     ) -> None:
         features: dict[str, dict[str, Any]] = {
             spec.key: {
@@ -345,6 +486,10 @@ class LeRobotWriterV3(DatasetWriter):
         }
         # The five bookkeeping columns are part of the v3 feature dict (the reader reads them back).
         for key, spec_dict in _BOOKKEEPING_FEATURES.items():
+            features[key] = dict(spec_dict)
+        # Stage-1 pass-through: re-emit the (copied) video feature specs so the output declares its
+        # video features and the v3 reader records them in meta.extra["video_features"] again.
+        for key, spec_dict in video_specs.items():
             features[key] = dict(spec_dict)
 
         total_frames = sum(int(r["length"]) for r in episode_records)
@@ -378,15 +523,46 @@ class LeRobotWriterV3(DatasetWriter):
             tasks_table = pa.Table.from_pylist(task_rows)
         pq.write_table(tasks_table, self.dest / "meta" / "tasks.parquet")  # type: ignore[no-untyped-call]
 
-    def _assert_roundtrip(self, expected_fingerprints: list[str]) -> None:
+    def _assert_roundtrip(
+        self, expected_fingerprints: list[str], copied_video_checksums: dict[str, str]
+    ) -> None:
         # Reload the just-written dataset and assert per-episode content fingerprints match exactly
-        # what we intended to write (invariant 2). The comparison is over the low-dim columns the
-        # writer persists; video features (if any on the source) are excluded by construction.
-        reread = [t.meta.fingerprint for t in LeRobotReaderV3(self.dest)]
+        # what we intended to write (invariant 2). The fingerprint comparison is over the low-dim
+        # columns the writer persists; video references are excluded from the content hash by
+        # construction (pixels are never loaded), so the low-dim guarantee is unchanged.
+        reader = LeRobotReaderV3(self.dest)
+        reread = [t.meta.fingerprint for t in reader]
         if reread != expected_fingerprints:
             raise ValidationError(
                 "round-trip reload mismatch: the written v3 dataset does not reload to the "
                 "low-dim content that was written"
+            )
+        # Stage-1 video pass-through round-trip: every copied shard must be present on disk and
+        # byte-identical to what was copied, and every reloaded VideoReference must resolve to a
+        # real shard file under the output (so the kept frames are genuinely preserved).
+        for rel, expected in copied_video_checksums.items():
+            shard = self.dest / rel
+            if not shard.is_file():
+                raise ValidationError(f"round-trip: copied video shard missing from output: {rel}")
+            if _sha256_file(shard) != expected:
+                raise ValidationError(f"round-trip: copied video shard changed after write: {rel}")
+        # Every reloaded reference that resolves to a shard must point to a real output file. A
+        # reference with shard_path=None is a legitimately opaque/low-dim feature (the source
+        # exposed no shard for it) and is not a pass-through failure.
+        for traj in reader:
+            for ref in traj.video_references().values():
+                if ref.shard_path is not None and not ref.shard_path.is_file():
+                    raise ValidationError(
+                        f"round-trip: reloaded video shard does not exist: {ref.shard_path}"
+                    )
+        # If the source actually had shards (we copied at least one), the output must carry them.
+        if copied_video_checksums and not any(
+            ref.shard_path is not None
+            for traj in reader
+            for ref in traj.video_references().values()
+        ):
+            raise ValidationError(
+                "round-trip: video shards were copied but none resolve on reload (lost references)"
             )
 
     def _quarantine(self) -> None:
