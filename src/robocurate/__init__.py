@@ -13,6 +13,16 @@ learned signals (Demo-SCORE, CUPID) live behind optional extras.
 from __future__ import annotations
 
 from robocurate import signals
+from robocurate.benchmark import (
+    BenchmarkResult,
+    BenchmarkSpec,
+    Leaderboard,
+    LeaderboardEntry,
+    ResolvedSubmission,
+    build_spec,
+    resolve_submission,
+    run_submission,
+)
 from robocurate.curator import (
     Budget,
     Combiner,
@@ -44,6 +54,8 @@ __version__ = "0.0.1"
 
 __all__ = [
     "Array",
+    "BenchmarkResult",
+    "BenchmarkSpec",
     "Budget",
     "Combiner",
     "CurationConfig",
@@ -58,6 +70,9 @@ __all__ = [
     "FeatureStore",
     "GateConfig",
     "InMemoryFeatureStore",
+    "Leaderboard",
+    "LeaderboardEntry",
+    "ResolvedSubmission",
     "ResourceProbe",
     "ScoreMatrix",
     "Scorecard",
@@ -67,6 +82,9 @@ __all__ = [
     "TrajectoryMeta",
     "WeightedSum",
     "__version__",
+    "build_spec",
     "fingerprint_arrays",
+    "resolve_submission",
+    "run_submission",
     "signals",
 ]

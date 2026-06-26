@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -343,6 +343,102 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_pool_reader(path: str) -> Any:
+    """Open a LeRobotDataset directory as a read-only reader (v2.1 or v3, auto-detected)."""
+    from robocurate.dataset import Dataset
+
+    return Dataset.from_lerobot(path).reader
+
+
+def _cmd_benchmark_init(args: argparse.Namespace) -> int:
+    """Build a frozen benchmark spec from a pool dataset and write it to ``--out``."""
+    from robocurate.benchmark.spec import build_spec
+
+    reader = _open_pool_reader(args.pool)
+    spec = build_spec(reader, eval_frac=args.eval_frac, seed=args.seed)
+    Path(args.out).write_text(
+        json.dumps(spec.to_dict(), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    msg = {
+        "out": str(args.out),
+        "pool": spec.pool.dataset_id,
+        "n_eval": len(spec.eval_split_indices),
+        "n_train_pool": len(spec.train_pool_indices),
+    }
+    print(json.dumps(msg) if args.json else msg)
+    return 0
+
+
+def _cmd_benchmark_run(args: argparse.Namespace) -> int:
+    """Score a submission against a spec; print the result and optionally append to a board."""
+    from robocurate.benchmark.leaderboard import append_entry
+    from robocurate.benchmark.runner import run_submission
+    from robocurate.benchmark.spec import BenchmarkSpec
+
+    spec = BenchmarkSpec.from_dict(json.loads(Path(args.spec).read_text(encoding="utf-8")))
+    reader = _open_pool_reader(args.pool) if args.pool else _open_pool_reader(spec.pool.dataset_id)
+    result = run_submission(spec, args.submission, reader, master_seed=args.seed)
+
+    name = args.name if args.name is not None else _default_name(args.submission)
+    if args.leaderboard is not None:
+        append_entry(args.leaderboard, result, name=name, created_utc=args.created_utc)
+
+    if args.json:
+        print(json.dumps(result.to_dict()))
+    else:
+        print(_result_markdown(result, name=name))
+    return 0
+
+
+def _cmd_benchmark_leaderboard(args: argparse.Namespace) -> int:
+    """Render a ranked leaderboard table (markdown or ``--json``)."""
+    from robocurate.benchmark.leaderboard import load_leaderboard
+
+    board = load_leaderboard(args.path)
+    print(board.to_json() if args.json else board.to_markdown())
+    return 0
+
+
+def _default_name(submission_path: str) -> str:
+    return Path(submission_path).stem
+
+
+def _result_markdown(result: Any, *, name: str) -> str:
+    """A compact markdown view of one scored submission (with the references and the caveat)."""
+    mean = result.mean_loss_by_arm
+    eff = result.submitted_vs_equal_n
+    lines = [
+        f"# Benchmark result — `{name}` ({result.submission_kind})",
+        "",
+        f"> {result.note}",
+        "",
+        f"- metric: `{result.metric}` (lower is better)",
+        f"- episodes selected (train pool): {result.num_kept}",
+        f"- seeds: {list(result.seeds)}",
+        "",
+        "| arm | mean held-out loss | 95% CI |",
+        "| --- | ---: | --- |",
+    ]
+    for arm in ("submitted", "equal_n_random", "full"):
+        m = mean[arm]
+        lines.append(
+            f"| {arm} | {float(m['mean']):.4f} | "
+            f"[{float(m['ci_low']):.4f}, {float(m['ci_high']):.4f}] |"
+        )
+    sep = "yes" if eff["separated"] else "no"
+    lines += [
+        "",
+        f"**submitted vs equal-N random:** {float(eff['effect']):+.4f} "
+        f"(95% CI [{float(eff['ci_low']):+.4f}, {float(eff['ci_high']):+.4f}]), "
+        f"separated: {sep}.",
+        "",
+        "_A win is a NEGATIVE effect (the submission's held-out loss is lower than the "
+        "equal-N random control's)._",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the full argument parser (the CLI surface shape)."""
     parser = argparse.ArgumentParser(prog="robocurate", description=__doc__)
@@ -427,7 +523,51 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_explain)
     p_explain.set_defaults(func=_cmd_explain)
 
+    _add_benchmark_commands(sub, add_common)
+
     return parser
+
+
+def _add_benchmark_commands(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+    add_common: Callable[[argparse.ArgumentParser], None],
+) -> None:
+    """Wire the nested ``benchmark`` command group (init / run / leaderboard)."""
+    p_bench = sub.add_parser(
+        "benchmark",
+        help="open-benchmark v0 — fixed pool + eval split + BC config; data is the submission.",
+    )
+    bench_sub = p_bench.add_subparsers(dest="benchmark_command", required=True)
+
+    p_init = bench_sub.add_parser(
+        "init", help="build a frozen benchmark spec (fixed eval split) from a pool dataset."
+    )
+    p_init.add_argument("pool", help="path to the pool LeRobotDataset directory.")
+    p_init.add_argument("--out", required=True, help="destination spec JSON path.")
+    p_init.add_argument(
+        "--eval-frac", type=float, default=0.2, help="fraction held out for eval (default 0.2)."
+    )
+    add_common(p_init)
+    p_init.set_defaults(func=_cmd_benchmark_init)
+
+    p_run = bench_sub.add_parser(
+        "run", help="score a submission (recipe or index-set) against a spec."
+    )
+    p_run.add_argument("submission", help="path to the submission JSON.")
+    p_run.add_argument("--spec", required=True, help="path to the benchmark spec JSON.")
+    p_run.add_argument("--pool", help="pool dataset path (defaults to the spec's pool dataset_id).")
+    p_run.add_argument("--leaderboard", help="append the result to this leaderboard JSON.")
+    p_run.add_argument("--name", help="submission name on the leaderboard (default: file stem).")
+    p_run.add_argument(
+        "--created-utc", help="timestamp recorded with the leaderboard entry (reproducible)."
+    )
+    add_common(p_run)
+    p_run.set_defaults(func=_cmd_benchmark_run)
+
+    p_lb = bench_sub.add_parser("leaderboard", help="render a ranked leaderboard table.")
+    p_lb.add_argument("path", help="path to the leaderboard JSON.")
+    add_common(p_lb)
+    p_lb.set_defaults(func=_cmd_benchmark_leaderboard)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

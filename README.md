@@ -93,6 +93,13 @@ The full strategy, the honest competitive picture, and where we're weak today ar
   sanity check on a synthetic 16-demo `identity_synthetic` dataset*, confirming the plumbing
   works; it is **not** a real-data curation result and we report no metric from it. See
   `experiments/modal_app.py`.
+- **Open-benchmark v0 scaffolding** (`robocurate benchmark`, "DataComp-for-robotics") — the data
+  is the submission: a frozen pool + fixed held-out eval split + fixed BC config; a submission is
+  a selection (recipe or index-set), scored by held-out BC loss vs an equal-N random control. This
+  is *scaffolding + a runnable synthetic proof* on a **proxy** metric (a documented coverage bias
+  toward the random control), **not** the field's adopted benchmark; the real pool + an unbiased
+  rollout-success metric + a public leaderboard are the funded next step. See
+  [`docs/BENCHMARK.md`](docs/BENCHMARK.md) and `examples/benchmark_identity.py`.
 
 ### Pending — the real downstream gate (honestly not passed yet)
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Open-benchmark v0 scaffolding** (`robocurate.benchmark`, "DataComp-for-robotics") — the data
+  is the submission: a frozen `BenchmarkSpec` pins a pool + a fixed held-out eval split + a fixed
+  BC training config; a submission is a *selection* (a recipe or a raw index-set); `run_submission`
+  scores it by held-out BC loss against an equal-N random control (Invariant 5) with bootstrap CIs
+  and a `separated` verdict (Invariant 6); an append-only, deterministic `Leaderboard` ranks
+  submissions and always shows the references + the proxy-metric caveat. Includes a `benchmark`
+  CLI group (`init` / `run` / `leaderboard`), a runnable `examples/benchmark_identity.py` proof on
+  the synthetic identity dataset, and `docs/BENCHMARK.md`. **Honest scope:** the held-out-loss
+  metric is a CPU *proxy* with a documented coverage bias toward the random control; the real pool
+  + an unbiased rollout-success metric (a `metric` seam) + a public leaderboard are the next step.
 - **LeRobotDataset v3.0 read adapter** (`LeRobotReaderV3`) — the current Hub default layout
   (multi-episode parquet shards + relational episode metadata), low-dim features, pyarrow-only,
   with version auto-detection in `Dataset.from_lerobot`. Validated on a real Hub dataset.

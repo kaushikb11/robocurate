@@ -149,6 +149,13 @@ heuristics winning. Four parts, in dependency order:*
   Jul 17 2026, proposes none). Build it on existing infra (LeRobotDataset + RoboCasa/RoboArena/
   LIBERO eval). This is the most achievable category-defining artifact within reach, and it sits
   directly on top of the controls we already have.
+  - **Status:** v0 scaffolding + synthetic reference shipped (CPU held-out-loss proxy) —
+    `src/robocurate/benchmark/` (frozen `BenchmarkSpec` with a fixed eval split, recipe/index-set
+    submissions, an equal-N random control, an append-only ranked leaderboard, a `benchmark`
+    CLI group, and a runnable `examples/benchmark_identity.py` proof; see `docs/BENCHMARK.md`).
+    The real pool + an unbiased **rollout-success** metric (the spec's `metric` is a seam for it) +
+    a public leaderboard is the funded next step — **not done**. The shipped metric is an honest
+    proxy with a documented coverage bias toward the random control, surfaced in every result.
 - **Own:** the open leaderboard/harness, the plugin signals (subsuming CUPID/SCIZOR/Demo-SCORE under
   one contract), the honest per-task + uncertainty reporting that single-number papers lack.
 - **Don't:** compete on raw VLA scale; over-anchor on unreplicated 2026 influence numbers; try to
