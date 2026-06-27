@@ -13,6 +13,7 @@ learned signals (Demo-SCORE, CUPID) live behind optional extras.
 from __future__ import annotations
 
 from robocurate import signals
+from robocurate.adapters.hdf5 import GenericHDF5Reader, HDF5Schema
 from robocurate.benchmark import (
     BenchmarkResult,
     BenchmarkSpec,
@@ -69,6 +70,8 @@ __all__ = [
     "FeatureSpec",
     "FeatureStore",
     "GateConfig",
+    "GenericHDF5Reader",
+    "HDF5Schema",
     "InMemoryFeatureStore",
     "Leaderboard",
     "LeaderboardEntry",

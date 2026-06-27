@@ -3848,6 +3848,9 @@ all = [
 demo-score = [
     { name = "torch" },
 ]
+hdf5 = [
+    { name = "h5py" },
+]
 influence = [
     { name = "torch" },
 ]
@@ -3892,6 +3895,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "av", marker = "extra == 'video'", specifier = ">=12" },
+    { name = "h5py", marker = "extra == 'hdf5'", specifier = ">=3.0" },
     { name = "h5py", marker = "extra == 'maniskill-demos'", specifier = ">=3.0" },
     { name = "h5py", marker = "extra == 'robomimic'", specifier = ">=3.0" },
     { name = "huggingface-hub", marker = "extra == 'lerobot'", specifier = ">=0.20" },
@@ -3911,7 +3915,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'influence'", specifier = ">=2.2" },
     { name = "torch", marker = "extra == 'policy'", specifier = ">=2.2" },
 ]
-provides-extras = ["demo-score", "influence", "policy", "rlds", "modal", "maniskill-demos", "maniskill", "robomimic", "viz", "lerobot", "video", "all"]
+provides-extras = ["demo-score", "influence", "policy", "rlds", "modal", "maniskill-demos", "maniskill", "robomimic", "hdf5", "viz", "lerobot", "video", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -56,7 +56,9 @@ The full strategy, the honest competitive picture, and where we're weak today ar
 - **Dataset adapters**: LeRobotDataset — **v3.0 read+write** (the current Hub default; low-dim
   features, version auto-detected, validated on a real Hub dataset) **and v2.1 read+write** — so
   curating a v3 dataset emits a v3 dataset. Plus RLDS / Open X-Embodiment, ManiSkill demonstrations,
-  and robomimic. (v3 video-frame decode is a follow-up; low-dim curation needs only pyarrow.)
+  robomimic, and a configurable **generic HDF5** reader (`GenericHDF5Reader` + `HDF5Schema`) that
+  curates any one-group-per-episode HDF5 dataset. (v3 video-frame decode is a follow-up; low-dim
+  curation needs only pyarrow.)
 - **Curator + CLI**: target-budget selection (three modes, see below), equal-N random baseline,
   hard validity-gate. CLI `curate` / `report` / `diff`, plus `list-signals`
   (every loadable quality signal and its install extra), `validate` (alias `doctor` — a

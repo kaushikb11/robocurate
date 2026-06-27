@@ -16,6 +16,7 @@ from robocurate.adapters.base import (
     ValidationReport,
     WriteReceipt,
 )
+from robocurate.adapters.hdf5 import GenericHDF5Reader, HDF5Schema
 from robocurate.adapters.lerobot import LeRobotReader, LeRobotWriter
 from robocurate.adapters.lerobot_v3 import LeRobotReaderV3
 from robocurate.adapters.lerobot_v3_writer import LeRobotWriterV3
@@ -27,6 +28,8 @@ from robocurate.adapters.robomimic import RoboMimicReader
 __all__ = [
     "DatasetReader",
     "DatasetWriter",
+    "GenericHDF5Reader",
+    "HDF5Schema",
     "InMemoryDatasetReader",
     "LeRobotReader",
     "LeRobotReaderV3",

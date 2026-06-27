@@ -112,7 +112,10 @@ per-file checksums.
 `read`+`write`) turns "source read-only" into a type-level guarantee rather than a code-review
 promise — the chosen design. The manifest holds `config_dict` (serialized) rather than
 importing the engine, keeping it below the curator in the import graph. RLDS and raw sim
-output slot in later by implementing the same two protocols. Targeting v2.1 first with v3
+output slot in later by implementing the same two protocols. Concrete readers already include
+RLDS, ManiSkill / robomimic demonstrations, and a configurable `GenericHDF5Reader` (driven by a
+small `HDF5Schema`) that reads any one-group-per-episode HDF5 dataset without a new reader class.
+Targeting v2.1 first with v3
 guarded was discussed; **both versions are declared in the surface** with v2.1 implemented and
 v3 raising clearly, so the v3 path fills in with no interface change.
 

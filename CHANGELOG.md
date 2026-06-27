@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Configurable generic HDF5 adapter** (`GenericHDF5Reader` + `HDF5Schema`, behind the `hdf5`
+  extra) — curate any one-group-per-episode HDF5 robot dataset, not just robomimic's
+  `data/demo_*` or ManiSkill's `traj_*`. A small frozen `HDF5Schema` describes where the pieces
+  live (`episode_root`, `episode_pattern`, `action_path`, `obs_path`, optional
+  `reward_path`/`success_path`/`timestamp_path`, group-vs-flat `obs` handling, per-key roles);
+  `HDF5Schema.robomimic_like()` / `maniskill_like()` pin the two known layouts and double as
+  worked examples. Read-only (`"r"`, invariant 1) and deterministic: episodes are natural-sorted
+  by the trailing integer in the group name (else lexically), so the order and `fingerprint()`
+  are stable. Image-hint obs keys raise rather than mis-handle pixels (low-dim v1 scope).
 - **`COVERAGE` selection mode** (`SelectionMode.COVERAGE`, CLI `--selection coverage`) — a greedy
   submodular **facility-location** selector that keeps a representative, *diverse* subset best
   covering the embedding distribution, instead of just the top-scoring trajectories. Preserves
