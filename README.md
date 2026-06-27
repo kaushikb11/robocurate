@@ -57,8 +57,8 @@ The full strategy, the honest competitive picture, and where we're weak today ar
   features, version auto-detected, validated on a real Hub dataset) **and v2.1 read+write** — so
   curating a v3 dataset emits a v3 dataset. Plus RLDS / Open X-Embodiment, ManiSkill demonstrations,
   and robomimic. (v3 video-frame decode is a follow-up; low-dim curation needs only pyarrow.)
-- **Curator + CLI**: target-budget top-K, equal-N random baseline, hard validity-gate,
-  greedy keep-one-representative dedup. CLI `curate` / `report` / `diff`, plus `list-signals`
+- **Curator + CLI**: target-budget selection (three modes, see below), equal-N random baseline,
+  hard validity-gate. CLI `curate` / `report` / `diff`, plus `list-signals`
   (every loadable quality signal and its install extra), `validate` (alias `doctor` — a
   read-only dataset health check: schema, structural defects, coverage), and `explain` (why one
   episode was kept or removed, read from a saved manifest).
@@ -164,6 +164,23 @@ Or from the CLI:
 ```bash
 robocurate curate ./aloha_sim_insertion --out ./aloha_curated --signals jerk --budget 0.8
 ```
+
+### Selection modes
+
+The curator turns per-trajectory keep-scores into a kept set under a budget via one of three
+modes (`--selection`, or `selection=SelectionMode.…` in the API). All three keep exactly the
+budgeted `k`, and the equal-N random baseline is always drawn from the same valid pool with the
+same `k`, so the curated-vs-random comparison is fair regardless of mode (Invariant 5).
+
+- **`top_k`** (default) — keep the highest keep-scoring trajectories. Simple and fastest;
+  ignores diversity, so a high-scoring majority cluster can crowd out everything else.
+- **`greedy_dedup`** — keep one representative per near-duplicate cluster (the highest-scoring
+  member), collapsing redundant bloat that top-K cannot. Tuned by `dedup_epsilon`.
+- **`coverage`** — greedy submodular **facility-location** over the embedding distribution: keep
+  a representative, *diverse* subset that best covers the whole distribution. This preserves
+  rare-but-valid modes (recovery/corrective demos, uncommon object poses) that top-K would
+  discard in favour of the dense majority. CPU-only, reuses the same statistical embedding as
+  dedup; `--coverage-quality-weight` tilts the objective from pure diversity toward keep-score.
 
 ## Guarantees
 

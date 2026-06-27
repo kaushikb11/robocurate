@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`COVERAGE` selection mode** (`SelectionMode.COVERAGE`, CLI `--selection coverage`) — a greedy
+  submodular **facility-location** selector that keeps a representative, *diverse* subset best
+  covering the embedding distribution, instead of just the top-scoring trajectories. Preserves
+  rare-but-valid modes that `top_k` crowds out behind a dense high-scoring majority. CPU-only,
+  reuses the same statistical embedding as `greedy_dedup`; `coverage_quality_weight` /
+  `--coverage-quality-weight` tilts the objective from pure diversity toward keep-score. Keeps
+  exactly the budgeted `k` and leaves the equal-N random baseline byte-identical across modes
+  (Invariant 5). Deterministic: all ordering breaks ties by `(keep_score, fingerprint)`, no RNG.
 - **Open-benchmark v0 scaffolding** (`robocurate.benchmark`, "DataComp-for-robotics") — the data
   is the submission: a frozen `BenchmarkSpec` pins a pool + a fixed held-out eval split + a fixed
   BC training config; a submission is a *selection* (a recipe or a raw index-set); `run_submission`

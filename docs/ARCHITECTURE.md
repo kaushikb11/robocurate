@@ -137,9 +137,12 @@ v3 raising clearly, so the v3 path fills in with no interface change.
    fair comparison on the valid data. No change to the frozen `Signal`/`TrajectoryScore`
    contract.
 5. Selects within the valid pool by `SelectionMode`: **`TOP_K`** (highest keep-scores under
-   `Budget`) or **`GREEDY_DEDUP`** (keep one representative per near-duplicate cluster — the
+   `Budget`), **`GREEDY_DEDUP`** (keep one representative per near-duplicate cluster — the
    highest keep-score member — via a z-standardized embedding + `dedup_epsilon`, which top-K
-   can't guarantee). **Ties break by fingerprint**, so identical `(dataset, config, seed)` →
+   can't guarantee), or **`COVERAGE`** (greedy submodular facility-location over the same
+   embedding — keep a diverse subset covering the whole distribution so rare-but-valid modes
+   survive; `coverage_quality_weight` tilts diversity toward keep-score). All three keep exactly
+   `K`. **Ties break by `(keep_score, fingerprint)`**, so identical `(dataset, config, seed)` →
    byte-identical decisions.
 6. **Equal-N random baseline** (invariant 5) is emitted by default: a same-size (`N=K`) random
    subset drawn from the **valid pool** with an independent `SeedSequence([seed,

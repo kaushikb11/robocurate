@@ -112,11 +112,15 @@ class SelectionMode(Enum):
 
     ``TOP_K`` keeps the highest-scoring trajectories under the budget. ``GREEDY_DEDUP`` keeps
     one representative per near-duplicate cluster (the highest-scoring member), which top-K
-    cannot guarantee.
+    cannot guarantee. ``COVERAGE`` greedily maximizes a submodular facility-location objective
+    over the embedding distribution, keeping a representative, diverse subset that covers the
+    whole distribution (so rare-but-valid modes survive instead of being crowded out by a
+    high-scoring majority cluster).
     """
 
     TOP_K = "top_k"
     GREEDY_DEDUP = "greedy_dedup"
+    COVERAGE = "coverage"
 
 
 @dataclass(frozen=True)
@@ -465,6 +469,7 @@ class Curator:
         gate: GateConfig | None = None,
         dedup_epsilon: float = DEFAULT_DEDUP_EPSILON,
         dedup_embedding: EmbeddingFn | None = None,
+        coverage_quality_weight: float = 0.0,
         batch_size: int = DEFAULT_BATCH_SIZE,
         resources: ResourceProbe | None = None,
         logger: logging.Logger | None = None,
@@ -480,6 +485,7 @@ class Curator:
         self.gate = gate
         self.dedup_epsilon = dedup_epsilon
         self.dedup_embedding = dedup_embedding
+        self.coverage_quality_weight = coverage_quality_weight
         self.batch_size = batch_size
         self.resources = resources if resources is not None else ResourceProbe()
         self._logger = logger
@@ -610,12 +616,15 @@ class Curator:
         k = budget.resolve(len(valid))
 
         # 3. Select within the valid pool by the chosen mode.
+        skipped: dict[int, str]
         if self.selection is SelectionMode.GREEDY_DEDUP:
-            selected, dedup_skipped = self._greedy_dedup(matrix, reader, valid, keep_score, k)
+            selected, skipped = self._greedy_dedup(matrix, reader, valid, keep_score, k)
+        elif self.selection is SelectionMode.COVERAGE:
+            selected, skipped = self._coverage_selection(matrix, reader, valid, keep_score, k)
         else:
             order = sorted(valid, key=lambda i: (-keep_score[i], matrix.refs[i].fingerprint))
             selected = set(order[:k])
-            dedup_skipped = {}
+            skipped = {}
 
         kept_idx: list[int] = []
         removed_idx: list[int] = []
@@ -628,7 +637,7 @@ class Curator:
                     episode_index=ref.episode_index,
                     fingerprint=ref.fingerprint,
                     kept=kept,
-                    reason=self._decision_reason(i, kept, gated, dedup_skipped, keep_score, k),
+                    reason=self._decision_reason(i, kept, gated, skipped, keep_score, k),
                     signal_values=self._signal_values_for(matrix, ref.fingerprint),
                 )
             )
@@ -712,6 +721,112 @@ class Curator:
                 return pos
         return None
 
+    def _coverage_selection(
+        self,
+        matrix: ScoreMatrix,
+        reader: DatasetReader,
+        valid: list[int],
+        keep_score: FloatArray,
+        k: int,
+    ) -> tuple[set[int], dict[int, str]]:
+        """Greedy submodular facility-location: keep a representative, diverse subset.
+
+        Picks trajectories that best *cover* the embedding distribution. Coverage of an embedded
+        position ``p`` by the selected set ``S`` is ``max(sim(p, s) for s in S)`` where
+        ``sim(a, b) = -||z_a - z_b||`` (negative Euclidean on the z-standardized embedding).
+        The facility-location value ``sum_p max_{s in S} sim(p, s)`` is monotone submodular, so a
+        lazy-greedy "pick the candidate with the largest marginal gain" is the standard
+        near-optimal selector. We add ``coverage_quality_weight * keep_score[c]`` so quality can
+        tilt the otherwise pure-diversity objective; ties break deterministically by
+        ``(-keep_score, fingerprint)``.
+
+        Returns ``(selected positions, {skipped position -> nearest-kept fingerprint})``.
+
+        Determinism: no RNG; all ordering is by keep_score+fingerprint. Float64 throughout.
+        Perf: O(k * |embedded| * |embedded|) — a marginal-gain pass over every embedded point
+        for every embedded candidate, repeated ``k`` times. Fine for typical curation sizes;
+        approximate nearest-neighbour acceleration for very large N is intentionally out of scope.
+        """
+        embeddings = self._dedup_embeddings(matrix, reader, valid)
+        order = sorted(valid, key=lambda i: (-keep_score[i], matrix.refs[i].fingerprint))
+        selected: set[int] = set()
+
+        # Edge case: nothing is embeddable -> fall back to pure TOP_K ordering (no diversity
+        # information exists, so the best we can do is keep the highest-scoring trajectories).
+        if not embeddings:
+            selected = set(order[:k])
+            skipped = self._coverage_skipped(matrix, embeddings, valid, selected, order)
+            return selected, skipped
+
+        embedded = [i for i in order if i in embeddings]
+        # Pairwise similarity matrix over embedded points (negative Euclidean distance).
+        zmat = np.vstack([embeddings[i] for i in embedded]).astype(np.float64)
+        diff = zmat[:, None, :] - zmat[None, :, :]
+        sim = -np.linalg.norm(diff, axis=2)  # (n_embedded, n_embedded), float64
+
+        pos_of = {pos: idx for idx, pos in enumerate(embedded)}
+        coverage = np.full(len(embedded), -np.inf, dtype=np.float64)
+
+        candidates = list(embedded)  # already in deterministic (-keep_score, fingerprint) order
+        while candidates and len(selected) < k:
+            best_pos = -1
+            best_gain = -np.inf
+            for c in candidates:
+                ci = pos_of[c]
+                # Marginal coverage gain: sum over embedded p of max(0, sim(c, p) - coverage[p]).
+                gain = float(np.maximum(0.0, sim[ci] - coverage).sum())
+                gain += self.coverage_quality_weight * float(keep_score[c])
+                # `candidates` is pre-sorted by (-keep_score, fingerprint), so the first
+                # strict maximum wins the deterministic tie-break automatically.
+                if gain > best_gain:
+                    best_gain = gain
+                    best_pos = c
+            selected.add(best_pos)
+            candidates.remove(best_pos)
+            coverage = np.maximum(coverage, sim[pos_of[best_pos]])
+
+        # Fill any leftover budget (fewer embedded points than k) deterministically by top
+        # keep_score among not-yet-selected valid positions, so len(selected) == k exactly and
+        # the equal-N baseline contract (same valid pool, same k) is preserved.
+        if len(selected) < k:
+            remaining = [i for i in order if i not in selected]
+            for i in remaining[: k - len(selected)]:
+                selected.add(i)
+
+        skipped = self._coverage_skipped(matrix, embeddings, valid, selected, order)
+        return selected, skipped
+
+    def _coverage_skipped(
+        self,
+        matrix: ScoreMatrix,
+        embeddings: dict[int, FloatArray],
+        valid: list[int],
+        selected: set[int],
+        order: list[int],
+    ) -> dict[int, str]:
+        """Map each removed valid position to the fingerprint that "represents" it.
+
+        For an embedded removed position, that is the nearest *selected* embedded position; for a
+        non-embedded removal (or when nothing was embedded), it is the top-kept fingerprint. Cheap
+        and deterministic so the scorecard can explain coverage removals.
+        """
+        top_kept = next((i for i in order if i in selected), None)
+        top_fp = matrix.refs[top_kept].fingerprint if top_kept is not None else ""
+        selected_embedded = [(i, embeddings[i]) for i in order if i in selected and i in embeddings]
+        skipped: dict[int, str] = {}
+        for i in valid:
+            if i in selected:
+                continue
+            vec = embeddings.get(i)
+            if vec is not None and selected_embedded:
+                nearest = min(
+                    selected_embedded, key=lambda pair: float(np.linalg.norm(vec - pair[1]))
+                )
+                skipped[i] = matrix.refs[nearest[0]].fingerprint
+            else:
+                skipped[i] = top_fp
+        return skipped
+
     def _dedup_embeddings(
         self, matrix: ScoreMatrix, reader: DatasetReader, valid: list[int]
     ) -> dict[int, FloatArray]:
@@ -740,7 +855,7 @@ class Curator:
         position: int,
         kept: bool,
         gated: set[int],
-        dedup_skipped: dict[int, str],
+        skipped: dict[int, str],
         keep_score: FloatArray,
         k: int,
     ) -> str:
@@ -748,8 +863,10 @@ class Curator:
             return f"removed by gate: {self.gate.signal} value tripped the validity threshold"  # type: ignore[union-attr]
         if kept:
             return f"kept: keep-score {keep_score[position]:.4f} (budget {k})"
-        if position in dedup_skipped:
-            return f"removed: near-duplicate of kept trajectory {dedup_skipped[position][:12]}"
+        if position in skipped:
+            if self.selection is SelectionMode.COVERAGE:
+                return "removed: represented by a kept trajectory (coverage selection)"
+            return f"removed: near-duplicate of kept trajectory {skipped[position][:12]}"
         return f"removed: keep-score {keep_score[position]:.4f} below budget {k}"
 
     def _signal_values_for(self, matrix: ScoreMatrix, fingerprint: str) -> dict[str, float]:

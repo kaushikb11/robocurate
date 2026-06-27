@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from robocurate import __version__, signals
 from robocurate.adapters.lerobot import LeRobotReader
-from robocurate.curator import Budget, Curator
+from robocurate.curator import Budget, Curator, SelectionMode
 from robocurate.scorecard import Scorecard
 
 if TYPE_CHECKING:
@@ -83,6 +83,8 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
         budget=budget,
         seed=args.seed,
         emit_baseline=not args.no_baseline,
+        selection=SelectionMode(args.selection),
+        coverage_quality_weight=args.coverage_quality_weight,
     )
 
 
@@ -460,6 +462,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_curate.add_argument("--out", required=True, help="destination for the curated dataset.")
     p_curate.add_argument("--signals", help="comma-separated signal names.")
     p_curate.add_argument("--budget", type=float, help="fraction of episodes to keep (0-1].")
+    p_curate.add_argument(
+        "--selection",
+        choices=["top_k", "greedy_dedup", "coverage"],
+        default="top_k",
+        help=(
+            "selection mode: top_k (highest keep-score), greedy_dedup (one representative per "
+            "near-duplicate cluster), or coverage (diverse, representative subset)."
+        ),
+    )
+    p_curate.add_argument(
+        "--coverage-quality-weight",
+        type=float,
+        default=0.0,
+        help="for --selection coverage: weight on keep-score vs. pure diversity (default 0.0).",
+    )
     p_curate.add_argument(
         "--no-baseline", action="store_true", help="skip the equal-N random baseline."
     )
