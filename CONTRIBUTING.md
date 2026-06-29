@@ -72,6 +72,25 @@ No signal should reach into engine internals. If you find yourself needing to, o
 issue first — the abstraction probably needs to change, and that's a discussion worth
 having before code.
 
+## Extending RoboCurate (custom signals & adapters)
+
+A full, code-driven tutorial lives in [`docs/EXTENDING.md`](docs/EXTENDING.md): how to write
+a custom signal (the `Signal` protocol, `fit`/`score`, `TrajectoryScore`, cost tiers and
+requirements, skipping gracefully, determinism, and registering via entry points) and a
+custom adapter (the read-only `DatasetReader` protocol). A minimal, runnable worked example
+is in [`examples/custom_signal.py`](examples/custom_signal.py).
+
+Before shipping a signal, verify it honors the contract with the **contract-checker** — it
+runs a battery of structural and behavioral checks against any `Signal` and returns the list
+of violations (empty means it passes):
+
+```python
+from robocurate.signals import check_signal_contract, assert_signal_contract
+
+assert check_signal_contract(MySignal()) == []   # inspect violations, or
+assert_signal_contract(MySignal())               # raise with the joined messages, for tests
+```
+
 ## Invariants — please don't break these
 
 These are the load-bearing guarantees the project makes. Every change is reviewed

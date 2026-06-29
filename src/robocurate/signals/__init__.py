@@ -40,6 +40,10 @@ from robocurate.signals.base import (
     SignalSpec,
     TrajectoryScore,
 )
+from robocurate.signals.contract import (
+    assert_signal_contract,
+    check_signal_contract,
+)
 from robocurate.signals.cupid import Cupid
 from robocurate.signals.demo_score import DemoScore
 from robocurate.signals.image_blur import ImageBlur
@@ -85,7 +89,9 @@ __all__ = [
     "TrajectoryScore",
     "VisualDiversity",
     "VisualStall",
+    "assert_signal_contract",
     "available",
+    "check_signal_contract",
     "get",
     "register",
     "statistical_embedding",

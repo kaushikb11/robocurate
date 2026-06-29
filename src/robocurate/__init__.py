@@ -39,6 +39,7 @@ from robocurate.curator import (
 from robocurate.dataset import Dataset
 from robocurate.metadata import DatasetFingerprint, DatasetMeta, ResourceProbe
 from robocurate.scorecard import Scorecard
+from robocurate.signals import assert_signal_contract, check_signal_contract
 from robocurate.trajectory import (
     Array,
     EmbodimentSpec,
@@ -88,7 +89,9 @@ __all__ = [
     "ZarrReader",
     "ZarrSchema",
     "__version__",
+    "assert_signal_contract",
     "build_spec",
+    "check_signal_contract",
     "fingerprint_arrays",
     "resolve_submission",
     "run_submission",
