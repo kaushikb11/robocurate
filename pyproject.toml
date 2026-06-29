@@ -146,11 +146,18 @@ module = [
     "tensorflow", "tensorflow.*", "tensorflow_datasets", "tensorflow_datasets.*",
     "gymnasium", "gymnasium.*", "mani_skill", "mani_skill.*",
     "h5py", "h5py.*",
-    "zarr", "zarr.*",
     "av", "av.*",
     "matplotlib", "matplotlib.*",
     "huggingface_hub", "huggingface_hub.*",
 ]
+ignore_missing_imports = true
+
+# zarr ships py.typed but its stubs are partial (e.g. Group.create_dataset, Array indexing),
+# and the adapter only touches it through an Any-typed lazy-import boundary. Skip following its
+# stubs entirely so it behaves like the other optional deps (Any), in or out of the env.
+[[tool.mypy.overrides]]
+module = ["zarr", "zarr.*"]
+follow_imports = "skip"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
