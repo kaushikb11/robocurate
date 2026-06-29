@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Four new CLI commands.** `profile` (a read-only dataset EDA report — episode-length and
+  per-feature distributions, embodiment/task balance, success rate, and a nearest-neighbour
+  diversity estimate; also `robocurate.dataset_profile`), `inspect <episode>` (one episode's
+  per-signal value, orientation, diagnostics, and a per-transition min/median/max + worst-step
+  trace), `compare <manifest_a> <manifest_b>` (diff two curation runs — kept-set sizes, Jaccard
+  overlap, kept↔removed flips, per-signal-summary deltas), and `verify <dataset> <manifest>` (re-run
+  a recorded run and assert the recomputed kept set + reasons are byte-identical — Invariant 3 made
+  user-facing; non-zero exit on mismatch).
+- **Configurable Zarr adapter** (`ZarrReader`, behind the `zarr` extra) — curate any
+  one-group-per-episode Zarr store, mirroring the HDF5 adapter and reusing the same storage-agnostic
+  schema (`ZarrSchema` is an alias of `HDF5Schema`). Read-only, deterministic natural-sort ordering,
+  image-hint keys raise.
+- **Expanded corruption suite + an honest detection-AUC blind-spot matrix.** Four new known-answer
+  corruptions (`frame_skip`, `action_quantize`, `wrong_target_offset`, `dropped_dof`) plus a
+  `detection_matrix(...)` that scores each cheap signal's detection-AUC per corruption and labels
+  every cell *detects* / *blind* / *inverts*. Runnable via `experiments/blindspot_matrix.py`. The
+  matrix is deliberately honest — e.g. it records that `dropped_dof` is a genuine blind spot for
+  every cheap geometric signal and that `path_efficiency` *inverts* on `truncate` (Invariant 6).
+- **Signal contract-checker + an extending guide.** `check_signal_contract(signal)` /
+  `assert_signal_contract(signal)` run a black-box battery against any `Signal` (well-formed spec,
+  one finite-or-skipped score per trajectory in order, per-transition shape, determinism) and return
+  the violations — so a contributor can validate a custom signal in one line. A `docs/EXTENDING.md`
+  tutorial (custom signals & adapters) and a worked `examples/custom_signal.py` accompany it.
 - **Configurable generic HDF5 adapter** (`GenericHDF5Reader` + `HDF5Schema`, behind the `hdf5`
   extra) — curate any one-group-per-episode HDF5 robot dataset, not just robomimic's
   `data/demo_*` or ManiSkill's `traj_*`. A small frozen `HDF5Schema` describes where the pieces

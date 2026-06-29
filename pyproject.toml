@@ -147,6 +147,7 @@ module = [
     "gymnasium", "gymnasium.*", "mani_skill", "mani_skill.*",
     "h5py", "h5py.*",
     "zarr", "zarr.*",
+    "av", "av.*",
     "matplotlib", "matplotlib.*",
     "huggingface_hub", "huggingface_hub.*",
 ]

@@ -56,14 +56,17 @@ The full strategy, the honest competitive picture, and where we're weak today ar
 - **Dataset adapters**: LeRobotDataset — **v3.0 read+write** (the current Hub default; low-dim
   features, version auto-detected, validated on a real Hub dataset) **and v2.1 read+write** — so
   curating a v3 dataset emits a v3 dataset. Plus RLDS / Open X-Embodiment, ManiSkill demonstrations,
-  robomimic, and a configurable **generic HDF5** reader (`GenericHDF5Reader` + `HDF5Schema`) that
-  curates any one-group-per-episode HDF5 dataset. (v3 video-frame decode is a follow-up; low-dim
-  curation needs only pyarrow.)
+  robomimic, and configurable **generic HDF5 and Zarr** readers (`GenericHDF5Reader` / `ZarrReader`
+  + a shared schema) that curate any one-group-per-episode HDF5/Zarr dataset. (v3 video-frame decode
+  is a follow-up; low-dim curation needs only pyarrow.)
 - **Curator + CLI**: target-budget selection (three modes, see below), equal-N random baseline,
-  hard validity-gate. CLI `curate` / `report` / `diff`, plus `list-signals`
-  (every loadable quality signal and its install extra), `validate` (alias `doctor` — a
-  read-only dataset health check: schema, structural defects, coverage), and `explain` (why one
-  episode was kept or removed, read from a saved manifest).
+  hard validity-gate. CLI `curate` / `report` / `diff`, plus `list-signals` (every loadable signal
+  and its install extra), `validate` (alias `doctor` — a read-only dataset health check),
+  `profile` (a dataset EDA report: length/feature distributions, task balance, a diversity
+  estimate), `inspect` (one episode's per-signal values + per-transition trace), `explain` (why an
+  episode was kept/removed from a saved manifest), `compare` (diff two curation runs — kept-set
+  overlap + flips), `verify` (re-run a manifest and prove byte-identical decisions), and the
+  `benchmark` group (the open "DataComp-for-robotics" v0).
 - **Shareable, reproducible curation runs.** Every `curate` write emits a provenance manifest
   (what was removed and why, the equal-N baseline, the config + seed + code version) and, by
   default, a Hugging Face `README.md` dataset card summarizing the run (`--no-card` to skip).
