@@ -24,6 +24,7 @@ from robocurate.adapters.maniskill_demos import ManiSkillDemoReader
 from robocurate.adapters.memory import InMemoryDatasetReader
 from robocurate.adapters.rlds import RLDSReader
 from robocurate.adapters.robomimic import RoboMimicReader
+from robocurate.adapters.zarr import ZarrReader, ZarrSchema
 
 __all__ = [
     "DatasetReader",
@@ -43,4 +44,6 @@ __all__ = [
     "ValidationError",
     "ValidationReport",
     "WriteReceipt",
+    "ZarrReader",
+    "ZarrSchema",
 ]

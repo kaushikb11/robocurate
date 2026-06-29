@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from robocurate import signals
 from robocurate.adapters.hdf5 import GenericHDF5Reader, HDF5Schema
+from robocurate.adapters.zarr import ZarrReader, ZarrSchema
 from robocurate.benchmark import (
     BenchmarkResult,
     BenchmarkSpec,
@@ -84,6 +85,8 @@ __all__ = [
     "Trajectory",
     "TrajectoryMeta",
     "WeightedSum",
+    "ZarrReader",
+    "ZarrSchema",
     "__version__",
     "build_spec",
     "fingerprint_arrays",

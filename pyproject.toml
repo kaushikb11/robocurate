@@ -55,6 +55,9 @@ maniskill = ["mani_skill>=3.0.0b", "robocurate[maniskill-demos]"]
 robomimic = ["h5py>=3.0"]
 # Reading arbitrary one-group-per-episode HDF5 datasets needs only h5py (an alias of the above).
 hdf5 = ["h5py>=3.0"]
+# Reading arbitrary one-group-per-episode Zarr stores needs only zarr (a pure-Python, CPU
+# cloud-native array store; pulls numcodecs). The reader shares the HDF5 layout schema.
+zarr = ["zarr>=2.16"]
 # Matplotlib-backed scorecard visualizations (optional reporting helpers, CPU-only).
 viz = ["matplotlib>=3.5"]
 # Downloading a real LeRobotDataset from the Hub (the v3 reader itself needs only pyarrow,
@@ -143,6 +146,7 @@ module = [
     "tensorflow", "tensorflow.*", "tensorflow_datasets", "tensorflow_datasets.*",
     "gymnasium", "gymnasium.*", "mani_skill", "mani_skill.*",
     "h5py", "h5py.*",
+    "zarr", "zarr.*",
     "matplotlib", "matplotlib.*",
     "huggingface_hub", "huggingface_hub.*",
 ]
@@ -157,6 +161,7 @@ markers = [
     "maniskill: tests that require the maniskill-demos extra (h5py); skipped in the core-only run",
     "robomimic: tests that require the robomimic extra (h5py); skipped in the core-only run",
     "hdf5: tests that require the hdf5 extra (h5py); skipped in the core-only run",
+    "zarr: tests that require the zarr extra; skipped in the core-only run",
     "viz: tests that require the viz extra (matplotlib); skipped in the core-only run",
     "lerobot: tests that download a real LeRobot Hub dataset (needs huggingface_hub + network); opt-in",
     "video: tests that require the video extra (av / PyAV); skipped in the core-only run",
