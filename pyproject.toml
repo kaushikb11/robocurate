@@ -58,8 +58,9 @@ hdf5 = ["h5py>=3.0"]
 # Reading arbitrary one-group-per-episode Zarr stores needs only zarr (a pure-Python, CPU
 # cloud-native array store; pulls numcodecs). The reader shares the HDF5 layout schema.
 # Cap below 3: zarr 3.x drops Python 3.10 (which we support) and rewrote the Group/Array API
-# the adapter targets — so <3 keeps a single zarr (2.x) across the 3.10–3.12 matrix.
-zarr = ["zarr>=2.16,<3"]
+# the adapter targets — so <3 keeps a single zarr (2.x) across the 3.10–3.12 matrix. numcodecs
+# is capped <0.13 because 0.13 removed `numcodecs.blosc.cbuffer_sizes`, which zarr 2.18 imports.
+zarr = ["zarr>=2.16,<3", "numcodecs>=0.10,<0.13"]
 # Matplotlib-backed scorecard visualizations (optional reporting helpers, CPU-only).
 viz = ["matplotlib>=3.5"]
 # Downloading a real LeRobotDataset from the Hub (the v3 reader itself needs only pyarrow,
