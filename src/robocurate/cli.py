@@ -26,6 +26,7 @@ from robocurate import __version__, signals
 from robocurate.adapters.lerobot import LeRobotReader
 from robocurate.curator import Budget, Curator, SelectionMode
 from robocurate.scorecard import Scorecard
+from robocurate.signals.base import SignalContext
 
 if TYPE_CHECKING:
     from robocurate.signals.base import Signal, SignalSpec
@@ -345,6 +346,468 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------------------
+# inspect — score one episode in depth
+# --------------------------------------------------------------------------------------
+
+# Cheap, laptop-friendly signals run by ``inspect`` when --signals is not given. These are
+# the Tier-0 signals that score a single low-dim episode meaningfully (no images, no GPU,
+# no dataset-wide statistics required); a user can request any registered signal explicitly.
+_INSPECT_DEFAULT_SIGNALS = (
+    "jerk",
+    "action_noise",
+    "path_efficiency",
+    "spectral_smoothness",
+)
+
+
+def _inspect_signal_context(seed: int, dataset_meta: Any) -> SignalContext:
+    """Build a minimal CPU :class:`SignalContext` for running signals on one episode."""
+    import logging
+
+    from robocurate.metadata import ResourceProbe
+    from robocurate.signals.base import InMemoryCache
+
+    return SignalContext(
+        seed=seed,
+        device="cpu",
+        cache=InMemoryCache(),
+        resources=ResourceProbe(),
+        dataset_meta=dataset_meta,
+        logger=logging.getLogger("robocurate.inspect"),
+    )
+
+
+def _per_transition_summary(per_transition: Any, *, worst: int = 3) -> dict[str, Any]:
+    """Summarize a ``(T,)`` per-transition trace: min/median/max + the worst few step indices.
+
+    "Worst" is the highest-magnitude steps, since per-transition traces are cost/severity-like
+    (larger = more notable); ties break by earliest step index for determinism.
+    """
+    import numpy as np
+
+    arr = np.asarray(per_transition, dtype=np.float64).reshape(-1)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return {"length": int(arr.size), "min": None, "median": None, "max": None, "worst": []}
+    order = sorted(range(arr.size), key=lambda i: (-abs(float(arr[i])), i))
+    worst_steps = [
+        {"step": int(i), "value": float(arr[i])} for i in order[:worst] if np.isfinite(arr[i])
+    ]
+    return {
+        "length": int(arr.size),
+        "min": float(finite.min()),
+        "median": float(np.median(finite)),
+        "max": float(finite.max()),
+        "worst": worst_steps,
+    }
+
+
+def _inspect_one(signal: Signal, traj: Any, ctx: SignalContext) -> dict[str, Any]:
+    """Fit (single-episode) then score ``traj`` with ``signal`` and build its descriptor."""
+    signal.fit([traj], ctx)
+    score = signal.score([traj], ctx)[0]
+    entry: dict[str, Any] = {
+        "signal": signal.spec.name,
+        "value": None if score.skipped else float(score.value),
+        "higher_is_better": score.higher_is_better,
+        "skipped": score.skipped,
+        "skip_reason": score.skip_reason,
+        "diagnostics": dict(score.diagnostics),
+    }
+    if signal.spec.produces_per_transition and score.per_transition is not None:
+        entry["per_transition"] = _per_transition_summary(score.per_transition)
+    return entry
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    """Deep-dive one episode: run the requested signals and report value + per-transition trace."""
+    reader = LeRobotReader(args.dataset)
+    try:
+        traj = reader.read_episode(args.episode_index)
+    except IndexError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    names = _split_csv(args.signals) or list(_INSPECT_DEFAULT_SIGNALS)
+    resolved = _resolve_signals(names)
+    ctx = _inspect_signal_context(args.seed, reader.meta)
+    entries = [_inspect_one(sig, traj, ctx) for sig in resolved]
+
+    payload: dict[str, Any] = {
+        "dataset": str(args.dataset),
+        "episode_index": traj.meta.episode_index,
+        "fingerprint": traj.meta.fingerprint,
+        "num_steps": traj.num_steps,
+        "signals": entries,
+    }
+    if args.json:
+        print(json.dumps(payload))
+        return 0
+    print(_inspect_markdown(payload))
+    return 0
+
+
+def _inspect_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"# Episode {payload['episode_index']} — `{payload['dataset']}`",
+        "",
+        f"- fingerprint: {str(payload['fingerprint'])[:12] or '(none)'}",
+        f"- steps: {payload['num_steps']}",
+        "",
+        "## Signals",
+        "",
+    ]
+    for entry in payload["signals"]:
+        orient = "higher=better" if entry["higher_is_better"] else "lower=better"
+        if entry["skipped"]:
+            lines.append(f"### {entry['signal']} — skipped")
+            lines.append(f"  reason: {entry['skip_reason'] or '(none given)'}")
+            lines.append("")
+            continue
+        lines.append(f"### {entry['signal']}")
+        lines.append(f"  value: {entry['value']:.4g} ({orient})")
+        diagnostics = entry.get("diagnostics") or {}
+        if diagnostics:
+            shown = ", ".join(f"{k}={_fmt_diag(v)}" for k, v in diagnostics.items())
+            lines.append(f"  diagnostics: {shown}")
+        pt = entry.get("per_transition")
+        if pt is not None:
+            lines.append(
+                f"  per-transition (T={pt['length']}): "
+                f"min={_fmt_diag(pt['min'])} median={_fmt_diag(pt['median'])} "
+                f"max={_fmt_diag(pt['max'])}"
+            )
+            if pt["worst"]:
+                worst = ", ".join(f"step {w['step']}={_fmt_diag(w['value'])}" for w in pt["worst"])
+                lines.append(f"  worst steps: {worst}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _fmt_diag(value: Any) -> str:
+    """Format a diagnostic scalar compactly for markdown."""
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return f"{value:.4g}"
+    return str(value)
+
+
+# --------------------------------------------------------------------------------------
+# profile — dataset EDA
+# --------------------------------------------------------------------------------------
+
+
+def _cmd_profile(args: argparse.Namespace) -> int:
+    """Profile a source dataset (EDA): shapes, features, success, tasks, diversity. No write."""
+    from robocurate.dataset import Dataset
+    from robocurate.profile import dataset_profile
+
+    dataset = Dataset.from_lerobot(args.dataset)
+    report = dataset_profile(dataset)
+    print(json.dumps(report.to_dict(), indent=2) if args.json else report.to_markdown())
+    return 0
+
+
+# --------------------------------------------------------------------------------------
+# compare — diff two curation runs
+# --------------------------------------------------------------------------------------
+
+
+def _load_manifest(path_str: str) -> dict[str, Any]:
+    """Load a manifest JSON from a path or a curated-dataset directory (like ``report``)."""
+    path = Path(path_str)
+    if path.is_dir():
+        path = path / "manifest.json"
+    if not path.is_file():
+        raise SystemExit(f"no manifest found at {path_str} (expected a manifest.json file)")
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"could not read manifest {path}: {exc}") from exc
+    return data
+
+
+def _kept_set(manifest: dict[str, Any]) -> set[int]:
+    """Reconstruct the kept episode-index set from a manifest's decisions."""
+    return {d["episode_index"] for d in manifest.get("decisions", []) if d.get("kept")}
+
+
+def _signal_summary(manifest: dict[str, Any]) -> dict[str, dict[str, float | None]]:
+    """Per-signal min/median/max over the decision-level signal values (NaN-safe).
+
+    Mirrors how the scorecard summarizes a manifest's per-signal distribution, so the
+    comparison's deltas line up with what ``report`` would show for each side.
+    """
+    import numpy as np
+
+    decisions = manifest.get("decisions", [])
+    names = [s["name"] for s in manifest.get("signals", [])]
+    out: dict[str, dict[str, float | None]] = {}
+    for name in names:
+        values = np.array(
+            [d.get("signal_values", {}).get(name, np.nan) for d in decisions], dtype=np.float64
+        )
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            out[name] = {
+                "min": float(finite.min()),
+                "median": float(np.median(finite)),
+                "max": float(finite.max()),
+            }
+        else:
+            out[name] = {"min": None, "median": None, "max": None}
+    return out
+
+
+def _cmd_compare(args: argparse.Namespace) -> int:
+    """Diff two curation runs: kept-set sizes, Jaccard overlap, flips, per-signal deltas."""
+    manifest_a = _load_manifest(args.manifest_a)
+    manifest_b = _load_manifest(args.manifest_b)
+
+    kept_a = _kept_set(manifest_a)
+    kept_b = _kept_set(manifest_b)
+    union = kept_a | kept_b
+    intersection = kept_a & kept_b
+    jaccard = (len(intersection) / len(union)) if union else 1.0
+
+    only_a = sorted(kept_a - kept_b)  # kept in A, removed in B
+    only_b = sorted(kept_b - kept_a)  # kept in B, removed in A
+    num_flipped = len(only_a) + len(only_b)
+
+    summary_a = _signal_summary(manifest_a)
+    summary_b = _signal_summary(manifest_b)
+    signal_deltas = _signal_deltas(summary_a, summary_b)
+
+    payload: dict[str, Any] = {
+        "a": {"path": args.manifest_a, "num_kept": len(kept_a)},
+        "b": {"path": args.manifest_b, "num_kept": len(kept_b)},
+        "jaccard": jaccard,
+        "num_intersection": len(intersection),
+        "num_union": len(union),
+        "num_flipped": num_flipped,
+        "kept_in_a_only": only_a,
+        "kept_in_b_only": only_b,
+        "signal_deltas": signal_deltas,
+    }
+    if args.json:
+        print(json.dumps(payload))
+        return 0
+    print(_compare_markdown(payload))
+    return 0
+
+
+def _signal_deltas(
+    summary_a: dict[str, dict[str, float | None]],
+    summary_b: dict[str, dict[str, float | None]],
+) -> dict[str, dict[str, float | None]]:
+    """Per-signal (B - A) deltas on min/median/max for signals present in both manifests."""
+    shared = sorted(set(summary_a) & set(summary_b))
+    deltas: dict[str, dict[str, float | None]] = {}
+    for name in shared:
+        a, b = summary_a[name], summary_b[name]
+        per_stat: dict[str, float | None] = {}
+        for stat in ("min", "median", "max"):
+            av, bv = a[stat], b[stat]
+            per_stat[stat] = None if av is None or bv is None else bv - av
+        deltas[name] = per_stat
+    return deltas
+
+
+def _compare_markdown(payload: dict[str, Any]) -> str:
+    a, b = payload["a"], payload["b"]
+    lines = [
+        "# Curation comparison",
+        "",
+        f"- A: `{a['path']}` — kept {a['num_kept']}",
+        f"- B: `{b['path']}` — kept {b['num_kept']}",
+        "",
+        f"- Jaccard overlap of kept episodes: {payload['jaccard']:.4f} "
+        f"({payload['num_intersection']}/{payload['num_union']})",
+        f"- Episodes that flipped kept<->removed: {payload['num_flipped']}",
+    ]
+    only_a = payload["kept_in_a_only"]
+    only_b = payload["kept_in_b_only"]
+    if only_a:
+        lines.append(f"  - kept in A but not B: {_fmt_index_list(only_a)}")
+    if only_b:
+        lines.append(f"  - kept in B but not A: {_fmt_index_list(only_b)}")
+    deltas = payload["signal_deltas"]
+    if deltas:
+        lines += ["", "## Per-signal summary deltas (B - A)", ""]
+        lines.append("| signal | Δmin | Δmedian | Δmax |")
+        lines.append("| --- | ---: | ---: | ---: |")
+        for name, d in deltas.items():
+            lines.append(
+                f"| {name} | {_fmt_delta(d['min'])} | {_fmt_delta(d['median'])} "
+                f"| {_fmt_delta(d['max'])} |"
+            )
+    return "\n".join(lines)
+
+
+def _fmt_index_list(indices: list[int], *, limit: int = 10) -> str:
+    """Render a few episode indices, eliding the tail when long."""
+    shown = ", ".join(str(i) for i in indices[:limit])
+    if len(indices) > limit:
+        shown += f", … (+{len(indices) - limit} more)"
+    return shown
+
+
+def _fmt_delta(value: float | None) -> str:
+    return "—" if value is None else f"{value:+.3f}"
+
+
+# --------------------------------------------------------------------------------------
+# verify — reproducibility check (Invariant 3, made user-facing)
+# --------------------------------------------------------------------------------------
+
+
+def _curator_from_manifest(manifest: dict[str, Any]) -> Curator:
+    """Rebuild the run's :class:`Curator` from a saved manifest.
+
+    The manifest records the exact signal specs that ran (under ``signals``) plus the resolved
+    config (combiner / budget / selection / gate / seed). The recipe loader reconstructs signals
+    from the combiner's weight keys, but a run whose combiner used default (unit) weights names
+    no signals there. So we seed those weight keys from the recorded signal names at their
+    implicit default weight of 1.0 (the same weight ``WeightedSum`` applies to an unlisted
+    signal), then reuse :func:`curator_from_config` — reproducing the run faithfully (Invariant 3)
+    through the public reconstruction path, with byte-identical weighting.
+    """
+    from robocurate.curator import CurationConfig
+    from robocurate.recipe import curator_from_config
+
+    config = CurationConfig.from_dict(manifest["config"])
+    combiner = dict(config.combiner_dict)
+    weights = dict(combiner.get("weights", {}))
+    for s in manifest.get("signals", []):
+        weights.setdefault(s["name"], 1.0)
+    combiner["weights"] = weights
+
+    augmented = CurationConfig(
+        combiner_dict=combiner,
+        budget=config.budget,
+        seed=config.seed,
+        emit_baseline=config.emit_baseline,
+        selection=config.selection,
+        gate_dict=config.gate_dict,
+        batch_size=config.batch_size,
+    )
+    return curator_from_config(augmented)
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    """Re-run a saved manifest/recipe and assert the recomputed selection matches it."""
+    from robocurate.recipe import load_recipe
+
+    reader = LeRobotReader(args.dataset)
+    spec = _load_manifest_or_none(args.spec)
+
+    if spec is not None and "decisions" in spec:
+        # A full curation manifest: it records the exact signals that ran AND the per-episode
+        # decisions to check the re-run against.
+        curator = _curator_from_manifest(spec)
+        expected_kept: list[int] | None = sorted(_kept_set(spec))
+        expected_reasons: dict[int, str] | None = {
+            int(d["episode_index"]): str(d.get("reason", "")) for d in spec.get("decisions", [])
+        }
+    else:
+        # A recipe carries config but no recorded decisions to check against; re-running it is
+        # still a useful determinism smoke-test, but there is nothing to verify equality with.
+        curator = load_recipe(args.spec)
+        expected_kept = None
+        expected_reasons = None
+
+    result = curator.run(reader)
+    recomputed_kept = sorted(result.kept_episode_indices)
+    recomputed_reasons = {int(d.episode_index): d.reason for d in result.decisions}
+
+    mismatches = _verify_mismatches(
+        expected_kept, recomputed_kept, expected_reasons, recomputed_reasons
+    )
+    verified = expected_kept is not None and not mismatches
+
+    payload: dict[str, Any] = {
+        "dataset": str(args.dataset),
+        "spec": str(args.spec),
+        "verified": verified,
+        "has_recorded_decisions": expected_kept is not None,
+        "num_kept_recomputed": len(recomputed_kept),
+        "mismatches": mismatches,
+    }
+    if args.json:
+        print(json.dumps(payload))
+    else:
+        print(_verify_markdown(payload))
+    return 0 if verified else 1
+
+
+def _load_manifest_or_none(path_str: str) -> dict[str, Any] | None:
+    """Load JSON at ``path_str`` (or its ``manifest.json``); ``None`` if unreadable as JSON."""
+    path = Path(path_str)
+    if path.is_dir():
+        path = path / "manifest.json"
+    if not path.is_file():
+        raise SystemExit(f"no manifest or recipe found at {path_str}")
+    try:
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"could not read {path}: {exc}") from exc
+    return data
+
+
+def _verify_mismatches(
+    expected_kept: list[int] | None,
+    recomputed_kept: list[int],
+    expected_reasons: dict[int, str] | None,
+    recomputed_reasons: dict[int, str],
+) -> list[str]:
+    """Build a precise list of where the re-run diverged from the recorded manifest."""
+    if expected_kept is None or expected_reasons is None:
+        return []
+    mismatches: list[str] = []
+    if expected_kept != recomputed_kept:
+        added = sorted(set(recomputed_kept) - set(expected_kept))
+        dropped = sorted(set(expected_kept) - set(recomputed_kept))
+        if added:
+            mismatches.append(f"newly kept (not in manifest): {_fmt_index_list(added)}")
+        if dropped:
+            mismatches.append(f"no longer kept (were in manifest): {_fmt_index_list(dropped)}")
+    for episode, expected_reason in expected_reasons.items():
+        recomputed_reason = recomputed_reasons.get(episode)
+        if recomputed_reason is not None and recomputed_reason != expected_reason:
+            mismatches.append(
+                f"episode {episode} reason changed: {expected_reason!r} -> {recomputed_reason!r}"
+            )
+    return mismatches
+
+
+def _verify_markdown(payload: dict[str, Any]) -> str:
+    verified = payload["verified"]
+    lines = [
+        "# Reproducibility check",
+        "",
+        f"- dataset: `{payload['dataset']}`",
+        f"- spec: `{payload['spec']}`",
+        f"- **verified: {'true' if verified else 'false'}**",
+    ]
+    if not payload["has_recorded_decisions"]:
+        lines.append(
+            "  (the spec is a recipe with no recorded decisions to verify against; the run "
+            "executed deterministically but there was nothing to compare to)"
+        )
+    if payload["mismatches"]:
+        lines += ["", "## Mismatches", ""]
+        lines += [f"- {m}" for m in payload["mismatches"]]
+    elif verified:
+        lines.append(
+            f"  Re-running reproduced all {payload['num_kept_recomputed']} kept episodes and "
+            "their recorded reasons exactly."
+        )
+    return "\n".join(lines)
+
+
 def _open_pool_reader(path: str) -> Any:
     """Open a LeRobotDataset directory as a read-only reader (v2.1 or v3, auto-detected)."""
     from robocurate.dataset import Dataset
@@ -539,6 +1002,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_explain.add_argument("episode_index", type=int, help="the source episode index to explain.")
     add_common(p_explain)
     p_explain.set_defaults(func=_cmd_explain)
+
+    p_inspect = sub.add_parser(
+        "inspect", help="deep-dive one episode: run signals and show per-transition traces."
+    )
+    p_inspect.add_argument("dataset", help="path to a LeRobotDataset directory.")
+    p_inspect.add_argument("episode_index", type=int, help="the episode index to inspect.")
+    p_inspect.add_argument(
+        "--signals",
+        help="comma-separated signal names (default: the cheap Tier-0 signals).",
+    )
+    add_common(p_inspect)
+    p_inspect.set_defaults(func=_cmd_inspect)
+
+    p_profile = sub.add_parser(
+        "profile", help="exploratory data analysis of a dataset (shapes, features, diversity)."
+    )
+    p_profile.add_argument("dataset", help="path to a LeRobotDataset directory.")
+    add_common(p_profile)
+    p_profile.set_defaults(func=_cmd_profile)
+
+    p_compare = sub.add_parser(
+        "compare", help="diff two curation runs (kept-set overlap, flips, per-signal deltas)."
+    )
+    p_compare.add_argument("manifest_a", help="first manifest or curated dataset.")
+    p_compare.add_argument("manifest_b", help="second manifest or curated dataset.")
+    add_common(p_compare)
+    p_compare.set_defaults(func=_cmd_compare)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="re-run a saved manifest/recipe and confirm it reproduces (Invariant 3).",
+    )
+    p_verify.add_argument("dataset", help="path to a LeRobotDataset directory.")
+    p_verify.add_argument("spec", help="path to a saved manifest.json or a recipe JSON.")
+    add_common(p_verify)
+    p_verify.set_defaults(func=_cmd_verify)
 
     _add_benchmark_commands(sub, add_common)
 
