@@ -213,6 +213,19 @@ class ScoreMatrix:
             return np.empty((len(self.refs), 0), dtype=np.float64)
         return np.column_stack(cols)
 
+    def normalized_signal_scores(self, signal_name: str) -> FloatArray:
+        """Per-trajectory keep-oriented normalized scores in [0, 1] for ``signal_name``.
+
+        The exact normalization the :class:`WeightedSum` combiner applies: min-max scaled over
+        this matrix, oriented so 1.0 == most keepable (respecting the signal's reported
+        ``higher_is_better``), with skipped (NaN) entries imputed to the neutral 0.5. Exposed
+        so report surfaces (e.g. ``robocurate rank``) attribute a combined keep-score to the
+        signals responsible without reimplementing combiner logic.
+        """
+        return _normalize_keep_oriented(
+            self.signal_values(signal_name), _orientation(self, signal_name)
+        )
+
 
 def _normalize_keep_oriented(values: FloatArray, higher_is_better: bool) -> FloatArray:
     """Min-max normalize to [0, 1] oriented so 1.0 == most keepable; NaN-safe.
@@ -368,6 +381,10 @@ class CurationResult:
     baseline: BaselineRecord | None
     config: CurationConfig
     signal_specs: tuple[SignalSpec, ...]
+    #: The combined per-trajectory keep-score the selection actually used (higher = keep),
+    #: aligned with ``score_matrix.refs``. Exposed so ranking/report surfaces reuse the run's
+    #: combiner output instead of recombining.
+    keep_scores: tuple[float, ...] = ()
     _reader: DatasetReader | None = None
 
     @property
@@ -651,6 +668,7 @@ class Curator:
             baseline=baseline,
             config=self._config_snapshot(),
             signal_specs=tuple(s.spec for s in signals),
+            keep_scores=tuple(float(v) for v in keep_score),
             _reader=reader,
         )
 

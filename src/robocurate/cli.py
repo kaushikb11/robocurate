@@ -3,8 +3,9 @@
 Commands mirror the Python API: ``score`` (report only, no write), ``curate`` (select +
 write a new dataset + manifest), ``baseline`` (emit the equal-N random control), ``report``
 (render a scorecard from a run), ``diff`` (raw vs curated), ``list-signals`` (the available
-quality signals), ``validate``/``doctor`` (a read-only dataset health check), and ``explain``
-(one episode's kept/removed decision from a saved manifest). Each accepts ``--seed`` and
+quality signals), ``validate``/``doctor`` (a read-only dataset health check), ``explain``
+(one episode's kept/removed decision from a saved manifest), and ``rank`` (a read-only
+"worst N episodes" report naming the signals responsible). Each accepts ``--seed`` and
 ``--json`` and records enough to reproduce a run from config + seed + code version.
 
 In this skeleton the parser and command wiring are real, but several commands are thin: the
@@ -29,7 +30,8 @@ from robocurate.scorecard import Scorecard
 from robocurate.signals.base import SignalContext
 
 if TYPE_CHECKING:
-    from robocurate.signals.base import Signal, SignalSpec
+    from robocurate.curator import CurationResult
+    from robocurate.signals.base import Signal, SignalSpec, TrajectoryScore
 
 
 def _resolve_signals(names: list[str]) -> list[Signal]:
@@ -493,6 +495,203 @@ def _fmt_diag(value: Any) -> str:
     if isinstance(value, (int, float)):
         return f"{value:.4g}"
     return str(value)
+
+
+# --------------------------------------------------------------------------------------
+# rank — the "worst N episodes" report (read-only)
+# --------------------------------------------------------------------------------------
+#
+# Once a dataset grows past a few dozen episodes, reviewing each one is impractical
+# (huggingface/lerobot#3760). ``rank`` turns "watch 200 episodes" into "watch these 8": it
+# scores every episode with cheap signals, combines them with the same machinery the curator
+# uses, and surfaces the worst-scoring episodes with the signals responsible — a diagnosis
+# starting point for "why doesn't my policy work". It never writes anything.
+
+
+def _cmd_rank(args: argparse.Namespace) -> int:
+    """Rank the worst episodes by combined keep-score and say which signals flagged each."""
+    if args.worst < 1:
+        raise SystemExit(f"--worst must be >= 1, got {args.worst}")
+    reader = _open_pool_reader(args.dataset)
+    names = _split_csv(args.signals) or list(_INSPECT_DEFAULT_SIGNALS)
+    # No budget: every episode is scored and none is selected away — this is a report, not a
+    # curation. The baseline is skipped because there is no selection to compare against.
+    curator = Curator(_resolve_signals(names), seed=args.seed, emit_baseline=False)
+    result = curator.run(reader)
+    payload = _rank_payload(result, dataset=str(args.dataset), worst=args.worst, seed=args.seed)
+    print(json.dumps(payload) if args.json else _rank_markdown(payload))
+    return 0
+
+
+def _rank_payload(result: CurationResult, *, dataset: str, worst: int, seed: int) -> dict[str, Any]:
+    """Build the machine-readable rank report from a no-budget curation result.
+
+    Episodes where *every* requested signal skipped are listed under ``unscored`` (with the
+    skip reasons) and excluded from the ranking — the combiner would impute them to the
+    neutral 0.5, which would silently rank them as mediocre rather than unknown.
+    """
+    matrix = result.score_matrix
+    names = [spec.name for spec in matrix.signal_specs]
+    normalized = {name: matrix.normalized_signal_scores(name) for name in names}
+
+    ranked_positions: list[int] = []
+    unscored: list[dict[str, Any]] = []
+    for i, ref in enumerate(matrix.refs):
+        scores = [matrix.scores.get((name, ref.fingerprint)) for name in names]
+        if scores and all(s is None or s.skipped for s in scores):
+            unscored.append(
+                {
+                    "episode_index": ref.episode_index,
+                    "fingerprint": ref.fingerprint,
+                    "skip_reason": _rank_skip_reason(scores),
+                }
+            )
+        else:
+            ranked_positions.append(i)
+
+    # Worst first: ascending combined keep-score, ties broken by fingerprint — the same
+    # deterministic tie-break the curator's selection uses (Invariant 3).
+    keep = result.keep_scores
+    ranked_positions.sort(key=lambda i: (keep[i], matrix.refs[i].fingerprint))
+    shown = ranked_positions[:worst]
+
+    entries: list[dict[str, Any]] = []
+    for rank, i in enumerate(shown, start=1):
+        ref = matrix.refs[i]
+        per_signal: list[dict[str, Any]] = []
+        for name in names:
+            score = matrix.scores.get((name, ref.fingerprint))
+            value = None if score is None or score.skipped else float(score.value)
+            per_signal.append(
+                {
+                    "signal": name,
+                    "value": value,
+                    "normalized": float(normalized[name][i]),
+                    "higher_is_better": True if score is None else score.higher_is_better,
+                    "skipped": value is None,
+                    "skip_reason": score.skip_reason if score is not None else None,
+                }
+            )
+        worst_signals = _rank_worst_signals(per_signal)
+        entries.append(
+            {
+                "rank": rank,
+                "episode_index": ref.episode_index,
+                "fingerprint": ref.fingerprint,
+                "num_steps": ref.num_steps,
+                "keep_score": float(keep[i]),
+                "worst_signals": worst_signals,
+                "reason": _rank_reason(worst_signals),
+                "signals": per_signal,
+            }
+        )
+
+    return {
+        "dataset": dataset,
+        "signals": names,
+        "seed": seed,
+        "num_episodes": matrix.num_trajectories,
+        "num_ranked": len(ranked_positions),
+        "num_shown": len(entries),
+        "worst": entries,
+        "unscored": unscored,
+    }
+
+
+def _rank_skip_reason(scores: list[TrajectoryScore | None]) -> str:
+    """Join the distinct skip reasons for an all-skipped episode (order-stable)."""
+    reasons: list[str] = []
+    for score in scores:
+        reason = (
+            score.skip_reason
+            if score is not None and score.skip_reason
+            else "signal produced no score"
+        )
+        if reason not in reasons:
+            reasons.append(reason)
+    return "; ".join(reasons)
+
+
+def _rank_worst_signals(
+    per_signal: list[dict[str, Any]], *, limit: int = 2
+) -> list[dict[str, Any]]:
+    """The one or two signals most responsible for a low keep-score.
+
+    The worst (lowest normalized keep-score) non-skipped signal is always named; a second is
+    added only when it is itself below the 0.5 neutral point — so every named signal actually
+    flags the episode, and no line hides behind an unexplained combined number (Invariant 6).
+    """
+    scored = [s for s in per_signal if not s["skipped"]]
+    scored.sort(key=lambda s: (s["normalized"], s["signal"]))
+    worst = scored[:1]
+    if len(scored) > 1 and scored[1]["normalized"] < 0.5:
+        worst.append(scored[1])
+    return [
+        {
+            "signal": s["signal"],
+            "value": s["value"],
+            "normalized": s["normalized"],
+            "higher_is_better": s["higher_is_better"],
+        }
+        for s in worst[:limit]
+    ]
+
+
+def _rank_reason(worst_signals: list[dict[str, Any]]) -> str:
+    """One honest line naming the signal(s) responsible for a low keep-score.
+
+    The percentage is the min-max position within *this* dataset's range on that signal
+    (from the same keep-oriented normalization the combiner uses) — a relative statement
+    about this dataset, not a calibrated probability that the episode hurts training.
+    """
+    if not worst_signals:
+        return "no signal produced a score"
+    parts: list[str] = []
+    for j, s in enumerate(worst_signals):
+        toward_worst = 100.0 * (1.0 - float(s["normalized"]))
+        frag = (
+            f"{s['signal']} (raw {s['value']:.4g}; {toward_worst:.0f}% of the way to this "
+            f"dataset's worst value)"
+        )
+        parts.append(("worst on " if j == 0 else "also low on ") + frag)
+    return "; ".join(parts)
+
+
+def _rank_markdown(payload: dict[str, Any]) -> str:
+    shown = payload["num_shown"]
+    total = payload["num_episodes"]
+    lines = [
+        f"# Worst episodes — `{payload['dataset']}`",
+        "",
+        f"Showing the {shown} lowest-scoring of {total} episodes, worst first, ranked by the "
+        f"combined keep-score of: {', '.join(payload['signals'])} (seed {payload['seed']}).",
+        "",
+        "> These heuristic signals are diagnostics, not proof an episode hurts training: a low",
+        '> rank means "watch this one first", not "delete it". Scores are normalized within',
+        "> this dataset (a relative ranking), and any removal should be validated against an",
+        "> equal-N random baseline before you trust it.",
+        "",
+    ]
+    for entry in payload["worst"]:
+        lines.append(
+            f"{entry['rank']}. **episode {entry['episode_index']}** — "
+            f"keep-score {entry['keep_score']:.3f} — {entry['reason']}"
+        )
+    if not payload["worst"]:
+        lines.append("(no episode could be ranked)")
+    if payload["unscored"]:
+        lines += [
+            "",
+            "## Unscored episodes (excluded from the ranking)",
+            "",
+            "Every requested signal skipped these episodes, so they have no keep-score. They",
+            "are reported here rather than silently ranked as neutral:",
+            "",
+        ]
+        lines += [
+            f"- episode {u['episode_index']}: {u['skip_reason']}" for u in payload["unscored"]
+        ]
+    return "\n".join(lines).rstrip()
 
 
 # --------------------------------------------------------------------------------------
@@ -1014,6 +1213,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(p_inspect)
     p_inspect.set_defaults(func=_cmd_inspect)
+
+    p_rank = sub.add_parser(
+        "rank",
+        help=(
+            "rank the worst episodes by combined keep-score, naming the signals responsible "
+            "(read-only; 'watch these 8', not 200)."
+        ),
+    )
+    p_rank.add_argument("dataset", help="path to a LeRobotDataset directory (v2.1 or v3).")
+    p_rank.add_argument(
+        "--signals",
+        help="comma-separated signal names (default: the cheap Tier-0 signals).",
+    )
+    p_rank.add_argument(
+        "--worst",
+        type=int,
+        default=10,
+        help="how many episodes to surface (default 10, capped at the dataset size).",
+    )
+    add_common(p_rank)
+    p_rank.set_defaults(func=_cmd_rank)
 
     p_profile = sub.add_parser(
         "profile", help="exploratory data analysis of a dataset (shapes, features, diversity)."

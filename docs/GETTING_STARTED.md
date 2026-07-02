@@ -67,6 +67,11 @@ uv run robocurate list-signals
 # Is my dataset healthy before I curate? (read-only: schema, structural defects, coverage)
 uv run robocurate validate ./demo_dataset       # alias: doctor
 
+# Which episodes should I watch first? A ranked worst-episodes report — "watch these 3",
+# not all 200 — with each line naming the signal(s) that flagged it. Read-only, and a
+# diagnostic starting point, not proof an episode hurts training.
+uv run robocurate rank ./demo_dataset --worst 3
+
 # Why was one specific episode kept or removed? (reads the saved manifest)
 uv run robocurate explain ./demo_curated 3
 ```

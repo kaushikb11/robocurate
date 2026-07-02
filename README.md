@@ -63,7 +63,9 @@ The full strategy, the honest competitive picture, and where we're weak today ar
   hard validity-gate. CLI `curate` / `report` / `diff`, plus `list-signals` (every loadable signal
   and its install extra), `validate` (alias `doctor` — a read-only dataset health check),
   `profile` (a dataset EDA report: length/feature distributions, task balance, a diversity
-  estimate), `inspect` (one episode's per-signal values + per-transition trace), `explain` (why an
+  estimate), `inspect` (one episode's per-signal values + per-transition trace), `rank` (a
+  ranked worst-N-episodes report naming the signals responsible — "watch these 8", not 200),
+  `explain` (why an
   episode was kept/removed from a saved manifest), `compare` (diff two curation runs — kept-set
   overlap + flips), `verify` (re-run a manifest and prove byte-identical decisions), and the
   `benchmark` group (the open "DataComp-for-robotics" v0).
