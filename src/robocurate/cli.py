@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robocurate import __version__, signals
-from robocurate.curator import Budget, Curator, SelectionMode
+from robocurate.curator import (
+    ON_ERROR_ABORT,
+    ON_ERROR_QUARANTINE,
+    Budget,
+    Curator,
+    SelectionMode,
+)
 from robocurate.scorecard import Scorecard
 from robocurate.signals.base import SignalContext
 
@@ -58,7 +64,7 @@ def _split_csv(value: str | None) -> list[str]:
 def _cmd_score(args: argparse.Namespace) -> int:
     resolved = _resolve_signals(_split_csv(args.signals))
     reader = _open_pool_reader(args.dataset, include_videos=_needs_video(resolved))
-    curator = Curator(resolved, seed=args.seed)
+    curator = Curator(resolved, seed=args.seed, on_error=args.on_error or ON_ERROR_ABORT)
     result = curator.run(reader)
     card = result.scorecard()
     print(card.to_json() if args.json else card.to_markdown())
@@ -106,7 +112,13 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
                 "--keep-list: a recipe already fixes the full curation config. Pass one or "
                 "the other, not both."
             )
-        return load_recipe(args.recipe)
+        curator = load_recipe(args.recipe)
+        if args.on_error is not None:
+            # An explicit --on-error overrides the recipe's policy: it is an operational
+            # read-tolerance knob, not part of the selection logic, and the run's manifest
+            # records the value actually used.
+            curator.on_error = args.on_error
+        return curator
     if args.drop_list is not None and args.keep_list is not None:
         raise SystemExit(
             "--drop-list and --keep-list are mutually exclusive: a drop-list removes the "
@@ -131,6 +143,7 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
         coverage_quality_weight=args.coverage_quality_weight,
         drop_episode_indices=drop,
         keep_episode_indices=keep,
+        on_error=args.on_error or ON_ERROR_ABORT,
     )
 
 
@@ -942,6 +955,7 @@ def _curator_from_manifest(manifest: dict[str, Any]) -> Curator:
         batch_size=config.batch_size,
         drop_episode_indices=config.drop_episode_indices,
         keep_episode_indices=config.keep_episode_indices,
+        on_error=config.on_error,
     )
     return curator_from_config(augmented)
 
@@ -1176,9 +1190,23 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--seed", type=int, default=0, help="master seed (determinism).")
         p.add_argument("--json", action="store_true", help="emit machine-readable JSON.")
 
+    def add_on_error(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--on-error",
+            choices=[ON_ERROR_ABORT, ON_ERROR_QUARANTINE],
+            default=None,
+            dest="on_error",
+            help=(
+                "reading-error policy: 'abort' (default — never silently tolerate "
+                "corruption) or 'quarantine' (record each unreadable episode as removed, "
+                "exclude it from the baseline pool, and keep going)."
+            ),
+        )
+
     p_score = sub.add_parser("score", help="score a dataset and print a scorecard (no write).")
     p_score.add_argument("dataset", help="path to a LeRobotDataset directory.")
     p_score.add_argument("--signals", help="comma-separated signal names.")
+    add_on_error(p_score)
     add_common(p_score)
     p_score.set_defaults(func=_cmd_score)
 
@@ -1187,6 +1215,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_curate.add_argument("--out", required=True, help="destination for the curated dataset.")
     p_curate.add_argument("--signals", help="comma-separated signal names.")
     p_curate.add_argument("--budget", type=float, help="fraction of episodes to keep (0-1].")
+    add_on_error(p_curate)
     p_curate.add_argument(
         "--drop-list",
         help="JSON file of episode indices to remove unconditionally (a JSON array, or "

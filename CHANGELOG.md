@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rail). The lists are recorded in the manifest/recipe, so `verify` reproduces list-based runs
   byte-identically. `rank --out-flags flags.json` writes the ranked worst-N indices in the
   accepted format, closing the loop: rank → human review → `curate --drop-list`.
+- **Failure-tolerant reading: a corrupt episode never has to abort a run.**
+  `Curator(on_error=...)` (CLI `--on-error {abort,quarantine}` on `curate`/`score`) adds a
+  reading-error policy. The default stays `"abort"` — a data-integrity tool must not silently
+  tolerate corruption — but under `"quarantine"` an unreadable episode (corrupt parquet, missing
+  file, crashed recording) is recorded as an unconditional removal in the decisions with reason
+  `"quarantined: unreadable episode (<ExcType>: <msg>)"`, excluded from BOTH the valid pool and
+  the equal-N baseline pool (mirroring the hard validity gate, Invariant 5), and summarized in
+  one end-of-scoring warning — never a silent drop (Invariants 2/6). Scope is reading errors
+  only: signals keep their skip-not-crash contract, and a raising signal remains a contract
+  violation. Determinism is preserved (same input → same exceptions → byte-identical decisions),
+  `on_error` round-trips through `CurationConfig`/recipes/manifests, and
+  `robocurate validate`/`doctor` now reports an unreadable episode as a finding
+  (`UnreadableEpisode`: index + error) instead of crashing the health check.
 - **Four new CLI commands.** `profile` (a read-only dataset EDA report — episode-length and
   per-feature distributions, embodiment/task balance, success rate, and a nearest-neighbour
   diversity estimate; also `robocurate.dataset_profile`), `inspect <episode>` (one episode's

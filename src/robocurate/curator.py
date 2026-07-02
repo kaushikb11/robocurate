@@ -315,6 +315,13 @@ def _orientation(matrix: ScoreMatrix, signal_name: str) -> bool:
 # Config
 # --------------------------------------------------------------------------------------
 
+# Reading-error policies (``Curator(on_error=...)``). ``"abort"`` is the default: a
+# data-integrity tool must not paper over corruption silently. ``"quarantine"`` records
+# each unreadable episode as an unconditional removal (never a silent drop) and keeps going.
+ON_ERROR_ABORT = "abort"
+ON_ERROR_QUARANTINE = "quarantine"
+_ON_ERROR_VALUES = (ON_ERROR_ABORT, ON_ERROR_QUARANTINE)
+
 
 @dataclass(frozen=True)
 class CurationConfig:
@@ -329,6 +336,7 @@ class CurationConfig:
     batch_size: int = DEFAULT_BATCH_SIZE
     drop_episode_indices: tuple[int, ...] | None = None
     keep_episode_indices: tuple[int, ...] | None = None
+    on_error: str = ON_ERROR_ABORT
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -345,6 +353,7 @@ class CurationConfig:
             "keep_episode_indices": (
                 list(self.keep_episode_indices) if self.keep_episode_indices is not None else None
             ),
+            "on_error": self.on_error,
         }
 
     @classmethod
@@ -378,6 +387,7 @@ class CurationConfig:
             keep_episode_indices=(
                 tuple(int(i) for i in keep_indices) if keep_indices is not None else None
             ),
+            on_error=str(data.get("on_error", ON_ERROR_ABORT)),
         )
 
 
@@ -523,11 +533,14 @@ class Curator:
         dedup_embedding: EmbeddingFn | None = None,
         coverage_quality_weight: float = 0.0,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        on_error: str = ON_ERROR_ABORT,
         resources: ResourceProbe | None = None,
         logger: logging.Logger | None = None,
         drop_episode_indices: Iterable[int] | None = None,
         keep_episode_indices: Iterable[int] | None = None,
     ) -> None:
+        if on_error not in _ON_ERROR_VALUES:
+            raise ValueError(f"on_error must be one of {_ON_ERROR_VALUES}, got {on_error!r}")
         self.signals = list(signals)
         if combiner is None:
             combiner = WeightedSum()
@@ -541,6 +554,7 @@ class Curator:
         self.dedup_embedding = dedup_embedding
         self.coverage_quality_weight = coverage_quality_weight
         self.batch_size = batch_size
+        self.on_error = on_error
         self.resources = resources if resources is not None else ResourceProbe()
         self._logger = logger
         # User episode lists (e.g. flags exported from a review tool or `robocurate rank`).
@@ -581,22 +595,41 @@ class Curator:
             batch_size=config.batch_size,
             drop_episode_indices=config.drop_episode_indices,
             keep_episode_indices=config.keep_episode_indices,
+            on_error=config.on_error,
             **kwargs,
         )
 
     # -- run -------------------------------------------------------------------------
 
     def run(self, reader: DatasetReader) -> CurationResult:
-        """Score every episode, combine, select under the budget, and emit the baseline."""
+        """Score every episode, combine, select under the budget, and emit the baseline.
+
+        Reading errors follow the ``on_error`` policy: under ``"abort"`` (the default) an
+        unreadable episode propagates unchanged; under ``"quarantine"`` it is recorded as an
+        unconditional removal (never a silent drop), excluded from the valid pool *and* the
+        equal-N baseline pool, and summarized in one warning. Determinism is preserved: the
+        same input raises the same exceptions, so the decisions are byte-identical.
+        """
         dataset_meta = reader.meta
         # One backing cache for the whole run; each signal gets a namespaced view so a
         # signal's fit() state reaches its score() without colliding with other signals.
         backing: CacheHandle = InMemoryCache()
         active = self._gate_signals()
         contexts = {sig.spec.name: self._context_for(sig, dataset_meta, backing) for sig in active}
-        self._fit(active, reader, contexts)
-        matrix = self._score(active, reader, contexts)
-        return self._select(matrix, active, reader)
+        # Under "quarantine", index -> "ExcType: msg" for every episode that failed to read
+        # (populated by the wrapped per-index reads in fit/score). None under "abort".
+        quarantined: dict[int, str] | None = {} if self.on_error == ON_ERROR_QUARANTINE else None
+        self._fit(active, reader, contexts, quarantined)
+        matrix = self._score(active, reader, contexts, quarantined)
+        if quarantined:
+            # ONE summary warning, never a silent drop (Invariant 6: honest reporting).
+            self._logger_or_default().warning(
+                "quarantined %d unreadable episode(s) of %d; recorded as removed in the "
+                "decisions and excluded from the valid + equal-N baseline pools",
+                len(quarantined),
+                len(reader),
+            )
+        return self._select(matrix, active, reader, quarantined or {})
 
     # -- internals -------------------------------------------------------------------
 
@@ -638,26 +671,57 @@ class Curator:
             active.append(sig)
         return active
 
+    def _episodes(
+        self, reader: DatasetReader, quarantined: dict[int, str] | None
+    ) -> Iterator[Trajectory]:
+        """One streaming pass over the reader's episodes, honoring the ``on_error`` policy.
+
+        Under ``"abort"`` (``quarantined is None``) this is the untouched streaming
+        ``iter(reader)``: a reading error propagates unchanged. Under ``"quarantine"`` a
+        raising iterator could not resume, so we read by index instead: each failed read is
+        recorded into ``quarantined`` (first exception wins, deterministically) and the
+        readable episodes are yielded in the same order.
+        """
+        if quarantined is None:
+            return iter(reader)
+        return self._readable_episodes(reader, quarantined)
+
+    def _readable_episodes(
+        self, reader: DatasetReader, quarantined: dict[int, str]
+    ) -> Iterator[Trajectory]:
+        for index in range(len(reader)):
+            try:
+                traj = reader.read_episode(index)
+            except Exception as exc:
+                # Reading errors only: no signal runs inside this loop, so a raising
+                # signal (a contract violation the contract-checker owns) is never
+                # swallowed here. Any read failure quarantines this episode.
+                quarantined.setdefault(index, f"{type(exc).__name__}: {exc}")
+                continue
+            yield traj
+
     def _fit(
         self,
         signals: list[Signal],
         reader: DatasetReader,
         contexts: dict[str, SignalContext],
+        quarantined: dict[int, str] | None,
     ) -> None:
         # Each signal gets a fresh iterator over the reader; the reader streams, so this does
         # not hold the whole dataset in RAM.
         for sig in signals:
-            sig.fit(iter(reader), contexts[sig.spec.name])
+            sig.fit(self._episodes(reader, quarantined), contexts[sig.spec.name])
 
     def _score(
         self,
         signals: list[Signal],
         reader: DatasetReader,
         contexts: dict[str, SignalContext],
+        quarantined: dict[int, str] | None,
     ) -> ScoreMatrix:
         refs: list[TrajectoryRef] = []
         scores: dict[tuple[str, str], TrajectoryScore] = {}
-        for batch in _batched(iter(reader), self.batch_size):
+        for batch in _batched(self._episodes(reader, quarantined), self.batch_size):
             for traj in batch:
                 refs.append(
                     TrajectoryRef(
@@ -702,11 +766,18 @@ class Curator:
                 )
 
     def _select(
-        self, matrix: ScoreMatrix, signals: list[Signal], reader: DatasetReader
+        self,
+        matrix: ScoreMatrix,
+        signals: list[Signal],
+        reader: DatasetReader,
+        quarantined: dict[int, str],
     ) -> CurationResult:
         n = matrix.num_trajectories
         keep_score = self.combiner.combined_score(matrix)
 
+        # 0. Quarantined (unreadable) episodes never entered the score matrix, so — like the
+        #    hard validity gate — they are excluded from the valid pool AND the equal-N
+        #    baseline pool. They are recorded below as unconditional removals.
         # 1. Hard validity gate + user episode lists: rejected trajectories are removed
         #    before the budget and excluded from the valid pool (and so from the equal-N
         #    baseline pool), each with an explicit recorded reason.
@@ -743,6 +814,19 @@ class Curator:
                     kept=kept,
                     reason=self._decision_reason(i, kept, gated, listed, skipped, keep_score, k),
                     signal_values=self._signal_values_for(matrix, ref.fingerprint),
+                )
+            )
+
+        # Unconditional removals for the quarantined episodes (sorted for determinism).
+        # Their content was unreadable, so no fingerprint or signal values exist.
+        for index in sorted(quarantined):
+            removed_idx.append(index)
+            decisions.append(
+                EpisodeDecision(
+                    episode_index=index,
+                    fingerprint="",
+                    kept=False,
+                    reason=f"quarantined: unreadable episode ({quarantined[index]})",
                 )
             )
 
@@ -1052,6 +1136,7 @@ class Curator:
                 if self.keep_episode_indices is not None
                 else None
             ),
+            on_error=self.on_error,
         )
 
 
@@ -1088,6 +1173,8 @@ def _batched(it: Iterable[Trajectory], size: int) -> Iterator[list[Trajectory]]:
 
 
 __all__ = [
+    "ON_ERROR_ABORT",
+    "ON_ERROR_QUARANTINE",
     "Budget",
     "BudgetKind",
     "Combiner",

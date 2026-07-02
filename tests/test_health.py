@@ -74,6 +74,31 @@ def test_health_flags_truncated_episode(tmp_path: Path) -> None:
     assert not report.ok
 
 
+def test_health_reports_unreadable_episode_instead_of_crashing(tmp_path: Path) -> None:
+    src = write_synthetic_lerobot_dataset(tmp_path / "src", num_episodes=4)
+    # Open first (the reader fingerprints all episodes at construction), then corrupt one
+    # episode's parquet bytes: the health check must report the finding, not crash.
+    reader = LeRobotReader(src)
+    (src / "data" / "chunk-000" / "episode_000001.parquet").write_bytes(b"\x00not a parquet")
+
+    report = dataset_health(reader)
+    assert not report.ok
+    assert report.num_episodes == 4  # readable + unreadable
+    assert len(report.unreadable) == 1
+    finding = report.unreadable[0]
+    assert finding.episode_index == 1
+    assert finding.error  # "<ExcType>: <msg>"
+    # Structural + coverage stats cover the 3 readable episodes.
+    assert report.structural.num_episodes == 3
+
+    d = report.to_dict()
+    assert d["ok"] is False
+    assert d["unreadable"] == [finding.to_dict()]
+    md = report.to_markdown()
+    assert "Unreadable episodes" in md
+    assert "episode 1:" in md
+
+
 def test_health_is_read_only(tmp_path: Path) -> None:
     src = write_synthetic_lerobot_dataset(tmp_path / "src", num_episodes=4)
     before = _checksum_tree(src)
