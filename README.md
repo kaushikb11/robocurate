@@ -158,17 +158,23 @@ datasets via `RLDSReader.from_tfds`).
 ```python
 from robocurate import Dataset, Curator, Budget, signals
 
-ds = Dataset.from_lerobot("./aloha_sim_insertion")            # local LeRobotDataset dir
+ds = Dataset.from_lerobot("./aloha_sim_insertion")            # local dir — or a Hub id,
+# e.g. Dataset.from_lerobot("lerobot/svla_so101_pickplace")   # needs the `lerobot` extra
 result = Curator([signals.Jerk()], budget=Budget.fraction(0.8)).run(ds)
 result.save("./aloha_curated")            # new dataset + manifest; source untouched
 print(result.scorecard().to_markdown())   # what was removed and why, + equal-N baseline
 ```
 
-Or from the CLI:
+Or from the CLI (again, a local directory or a Hub id):
 
 ```bash
 robocurate curate ./aloha_sim_insertion --out ./aloha_curated --signals jerk --budget 0.8
+robocurate profile lerobot/svla_so101_pickplace   # Hub id: downloads low-dim files only
 ```
+
+Hub ids download through the `huggingface_hub` cache and pull **low-dim files only** (metadata +
+parquet; never the mp4 video shards) unless an image signal is requested — so profiling a large
+video dataset stays fast and small. The cache is a read-only source like any other.
 
 ### Selection modes
 

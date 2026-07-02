@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The CLI now works end-to-end on LeRobot v3.0 datasets.** `score` / `curate` / `baseline` /
+  `inspect` / `diff` / `verify` hardcoded the v2.1 reader (and crashed on a v3 directory), and
+  `CurationResult.save` hardcoded the v2.1 writer — so "curating a v3 dataset emits a v3 dataset"
+  did not hold through the public path. All dataset-reading commands now auto-detect the on-disk
+  version, and `save` picks the writer matching the source (a v3 source writes v3, including the
+  Stage-1 video-shard pass-through).
+- **Per-episode fingerprints are content-only.** The positional bookkeeping columns
+  (`episode_index`/`frame_index`/`index`/`task_index`), which real v3 datasets declare as
+  features, are excluded from the content fingerprint — so a round-tripped episode keeps its
+  fingerprint even after kept episodes are re-indexed, and `diff`/dedup/manifest matching stay
+  correct.
+- **A signal that skips every episode now warns loudly** (e.g. a sim-only signal on real data, or
+  an image signal on a dataset with no decodable video) instead of silently contributing only
+  neutral imputed scores.
+
 ### Added
+
+- **Hub-id ingestion.** `Dataset.from_lerobot` (and every dataset-reading CLI command) accepts a
+  `namespace/name` Hugging Face Hub dataset id as well as a local directory (an existing local
+  path always wins). Hub ids snapshot-download through the `huggingface_hub` cache — **low-dim
+  files only** (metadata + parquet, never the mp4 video shards) unless an image signal is
+  requested (`include_videos=True` in the API). The repo id, not the machine-specific cache
+  path, is recorded as the dataset id so fingerprints and manifests from Hub sources are
+  shareable. Needs the `lerobot` extra; without it, a Hub id fails with an actionable install
+  hint.
 
 - **Four new CLI commands.** `profile` (a read-only dataset EDA report — episode-length and
   per-feature distributions, embodiment/task balance, success rate, and a nearest-neighbour

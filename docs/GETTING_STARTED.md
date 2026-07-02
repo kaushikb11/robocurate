@@ -93,6 +93,15 @@ reads only the validated output directory, never your source, and needs the `ler
 
 ## Next, on real data
 
+Any dataset-reading command also accepts a Hugging Face Hub dataset id directly (needs the
+`lerobot` extra: `uv sync --extra lerobot`). Only the low-dim files are downloaded — metadata
+and parquet, never the mp4 video shards — so this is fast even for large video datasets:
+
+```
+uv run robocurate profile lerobot/svla_so101_pickplace
+uv run robocurate validate lerobot/svla_so101_pickplace
+```
+
 When you want to see the signals run against a real public dataset with ground-truth
 quality labels:
 

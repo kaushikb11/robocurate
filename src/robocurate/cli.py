@@ -54,8 +54,9 @@ def _split_csv(value: str | None) -> list[str]:
 
 
 def _cmd_score(args: argparse.Namespace) -> int:
-    reader = _open_pool_reader(args.dataset)
-    curator = Curator(_resolve_signals(_split_csv(args.signals)), seed=args.seed)
+    resolved = _resolve_signals(_split_csv(args.signals))
+    reader = _open_pool_reader(args.dataset, include_videos=_needs_video(resolved))
+    curator = Curator(resolved, seed=args.seed)
     result = curator.run(reader)
     card = result.scorecard()
     print(card.to_json() if args.json else card.to_markdown())
@@ -91,8 +92,8 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
 def _cmd_curate(args: argparse.Namespace) -> int:
     from robocurate.recipe import save_recipe
 
-    reader = _open_pool_reader(args.dataset)
     curator = _curate_curator(args)
+    reader = _open_pool_reader(args.dataset, include_videos=_needs_video(curator.signals))
     result = curator.run(reader)
     receipt = result.save(
         args.out,
@@ -421,14 +422,13 @@ def _inspect_one(signal: Signal, traj: Any, ctx: SignalContext) -> dict[str, Any
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
     """Deep-dive one episode: run the requested signals and report value + per-transition trace."""
-    reader = _open_pool_reader(args.dataset)
+    names = _split_csv(args.signals) or list(_INSPECT_DEFAULT_SIGNALS)
+    resolved = _resolve_signals(names)
+    reader = _open_pool_reader(args.dataset, include_videos=_needs_video(resolved))
     try:
         traj = reader.read_episode(args.episode_index)
     except IndexError as exc:
         raise SystemExit(str(exc)) from exc
-
-    names = _split_csv(args.signals) or list(_INSPECT_DEFAULT_SIGNALS)
-    resolved = _resolve_signals(names)
     ctx = _inspect_signal_context(args.seed, reader.meta)
     entries = [_inspect_one(sig, traj, ctx) for sig in resolved]
 
@@ -700,7 +700,6 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     """Re-run a saved manifest/recipe and assert the recomputed selection matches it."""
     from robocurate.recipe import load_recipe
 
-    reader = _open_pool_reader(args.dataset)
     spec = _load_manifest_or_none(args.spec)
 
     if spec is not None and "decisions" in spec:
@@ -718,6 +717,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         expected_kept = None
         expected_reasons = None
 
+    reader = _open_pool_reader(args.dataset, include_videos=_needs_video(curator.signals))
     result = curator.run(reader)
     recomputed_kept = sorted(result.kept_episode_indices)
     recomputed_reasons = {int(d.episode_index): d.reason for d in result.decisions}
@@ -807,15 +807,24 @@ def _verify_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _open_pool_reader(path: str) -> Any:
-    """Open a LeRobotDataset directory as a read-only reader (v2.1 or v3, auto-detected).
+def _open_pool_reader(path: str, *, include_videos: bool = False) -> Any:
+    """Open a LeRobotDataset (local directory or Hub id) as a read-only reader.
 
     Every dataset-reading CLI command routes through here so that all of them accept both
-    on-disk LeRobot layouts; nothing outside this helper names a concrete reader class.
+    on-disk LeRobot layouts and ``namespace/name`` Hub ids; nothing outside this helper names
+    a concrete reader class. ``include_videos`` controls whether a Hub download pulls the mp4
+    shards — pass it only when a requested signal actually decodes frames.
     """
     from robocurate.dataset import Dataset
 
-    return Dataset.from_lerobot(path).reader
+    return Dataset.from_lerobot(path, include_videos=include_videos).reader
+
+
+def _needs_video(resolved: list[Signal]) -> bool:
+    """Whether any requested signal needs decodable frames (drives the Hub video download)."""
+    from robocurate.signals.base import REQUIRES_IMAGE
+
+    return any(REQUIRES_IMAGE in sig.spec.requires for sig in resolved)
 
 
 def _cmd_benchmark_init(args: argparse.Namespace) -> int:
