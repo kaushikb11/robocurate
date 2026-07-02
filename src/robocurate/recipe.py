@@ -1,10 +1,11 @@
 """Shareable curation recipes — save a :class:`Curator`'s config, reload it as a Curator.
 
 A *recipe* is the fully-resolved, JSON-serializable configuration of a curation run: the
-combiner and its weights, the budget, the selection mode, the validity gate, and the master
-seed. Saving a recipe lets a user hand someone "the exact knobs I curated with", and loading
-it reconstructs a ready-to-run :class:`~robocurate.curator.Curator` whose signals are rebuilt
-from the combiner's weight keys via the signal registry.
+combiner and its weights, the budget, the selection mode, the validity gate, the
+reading-error policy (``on_error``), and the master seed. Saving a recipe lets a user hand
+someone "the exact knobs I curated with", and loading it reconstructs a ready-to-run
+:class:`~robocurate.curator.Curator` whose signals are rebuilt from the combiner's weight
+keys via the signal registry.
 
 Because a recipe captures the resolved :class:`~robocurate.curator.CurationConfig` (including
 the seed) and the selection path is deterministic (Invariant 3), running a loaded recipe on
@@ -105,6 +106,7 @@ def curator_from_config(config: CurationConfig) -> Curator:
         selection=SelectionMode(config.selection),
         gate=_gate_from_dict(config.gate_dict),
         batch_size=config.batch_size,
+        on_error=config.on_error,
     )
 
 

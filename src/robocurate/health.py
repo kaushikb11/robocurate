@@ -8,6 +8,8 @@ cheap, CPU-only checks into a single :class:`HealthReport`:
 1. **Readability / schema** — the reader has already parsed ``meta/info.json`` and the
    per-episode parquet on construction, so a dataset that reaches this code is structurally
    loadable. The report records the episode count, feature keys, and embodiment ids.
+   Episodes whose bytes cannot be read (corrupt parquet, missing file) are reported as
+   :class:`UnreadableEpisode` findings — index + error — rather than crashing the check.
 2. **Structural defects** — runs :class:`~robocurate.signals.structural_validity.StructuralValidity`
    over every episode (fit then score) and tallies how many are valid vs. truncated /
    stalled / non-finite, reading the per-episode diagnostics. This catches the incomplete,
@@ -38,6 +40,25 @@ from robocurate.trajectory import FeatureRole
 if TYPE_CHECKING:
     from robocurate.adapters.base import DatasetReader
     from robocurate.trajectory import Trajectory
+
+
+@dataclass(frozen=True)
+class UnreadableEpisode:
+    """One episode whose bytes could not be read (corrupt parquet, missing file, ...).
+
+    The health check is read-only reporting, so an unreadable episode is always a
+    *finding* (index + error), never a crash of the whole diagnosis.
+
+    Attributes:
+        episode_index: The episode's index in the source dataset.
+        error: ``"<ExcType>: <msg>"`` for the exception the read raised.
+    """
+
+    episode_index: int
+    error: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"episode_index": self.episode_index, "error": self.error}
 
 
 @dataclass(frozen=True)
@@ -130,8 +151,11 @@ class HealthReport:
         num_episodes: Number of episodes the reader exposes.
         embodiment_ids: Distinct embodiment ids present.
         feature_keys: All declared feature keys.
-        structural: The :class:`StructuralSummary` defect tally.
-        coverage: One :class:`FeatureCoverage` per declared feature key.
+        structural: The :class:`StructuralSummary` defect tally (over the readable episodes).
+        coverage: One :class:`FeatureCoverage` per declared feature key (over the readable
+            episodes).
+        unreadable: One :class:`UnreadableEpisode` per episode whose bytes could not be
+            read at all; these are reported as findings rather than crashing the check.
     """
 
     dataset_id: str
@@ -141,11 +165,12 @@ class HealthReport:
     feature_keys: tuple[str, ...]
     structural: StructuralSummary
     coverage: tuple[FeatureCoverage, ...] = field(default_factory=tuple)
+    unreadable: tuple[UnreadableEpisode, ...] = ()
 
     @property
     def ok(self) -> bool:
-        """Whether the dataset is free of structural defects (still loadable regardless)."""
-        return self.structural.num_invalid == 0
+        """Whether the dataset is free of structural defects and unreadable episodes."""
+        return self.structural.num_invalid == 0 and not self.unreadable
 
     def to_dict(self) -> dict[str, Any]:
         """Return the machine-readable report as a JSON-serializable dict."""
@@ -158,6 +183,7 @@ class HealthReport:
             "feature_keys": list(self.feature_keys),
             "structural": self.structural.to_dict(),
             "coverage": [c.to_dict() for c in self.coverage],
+            "unreadable": [u.to_dict() for u in self.unreadable],
         }
 
     def to_markdown(self) -> str:
@@ -183,6 +209,14 @@ class HealthReport:
         if s.defect_episode_indices:
             shown = ", ".join(str(i) for i in s.defect_episode_indices)
             lines.append(f"- Defective episode indices: {shown}")
+        if self.unreadable:
+            lines += [
+                "",
+                "## Unreadable episodes",
+                "",
+                f"- {len(self.unreadable)} of {self.num_episodes} episodes could not be read:",
+            ]
+            lines += [f"  - episode {u.episode_index}: {u.error}" for u in self.unreadable]
         lines += [
             "",
             "## Feature coverage",
@@ -223,11 +257,22 @@ def dataset_health(reader: DatasetReader) -> HealthReport:
         A :class:`HealthReport` summarizing the dataset's health.
     """
     meta = reader.meta
-    trajectories = list(reader)
-    num_episodes = len(trajectories)
+    # Read per-episode by index so one unreadable episode (corrupt parquet, missing file)
+    # becomes a finding rather than aborting the whole health check: this is read-only
+    # reporting, so tolerating + reporting is always correct here.
+    trajectories: list[Trajectory] = []
+    unreadable: list[UnreadableEpisode] = []
+    for index in range(len(reader)):
+        try:
+            trajectories.append(reader.read_episode(index))
+        except Exception as exc:
+            unreadable.append(
+                UnreadableEpisode(episode_index=index, error=f"{type(exc).__name__}: {exc}")
+            )
+    num_episodes = len(trajectories) + len(unreadable)
 
     structural = _structural_summary(trajectories)
-    coverage = _coverage(trajectories, num_episodes)
+    coverage = _coverage(trajectories, len(trajectories))
 
     return HealthReport(
         dataset_id=meta.fingerprint.dataset_id,
@@ -237,6 +282,7 @@ def dataset_health(reader: DatasetReader) -> HealthReport:
         feature_keys=tuple(meta.feature_keys),
         structural=structural,
         coverage=coverage,
+        unreadable=tuple(unreadable),
     )
 
 
@@ -367,5 +413,6 @@ __all__ = [
     "FeatureCoverage",
     "HealthReport",
     "StructuralSummary",
+    "UnreadableEpisode",
     "dataset_health",
 ]

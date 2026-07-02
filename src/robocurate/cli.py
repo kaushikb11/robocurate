@@ -24,7 +24,13 @@ from typing import TYPE_CHECKING, Any
 
 from robocurate import __version__, signals
 from robocurate.adapters.lerobot import LeRobotReader
-from robocurate.curator import Budget, Curator, SelectionMode
+from robocurate.curator import (
+    ON_ERROR_ABORT,
+    ON_ERROR_QUARANTINE,
+    Budget,
+    Curator,
+    SelectionMode,
+)
 from robocurate.scorecard import Scorecard
 from robocurate.signals.base import SignalContext
 
@@ -56,7 +62,11 @@ def _split_csv(value: str | None) -> list[str]:
 
 def _cmd_score(args: argparse.Namespace) -> int:
     reader = LeRobotReader(args.dataset)
-    curator = Curator(_resolve_signals(_split_csv(args.signals)), seed=args.seed)
+    curator = Curator(
+        _resolve_signals(_split_csv(args.signals)),
+        seed=args.seed,
+        on_error=args.on_error or ON_ERROR_ABORT,
+    )
     result = curator.run(reader)
     card = result.scorecard()
     print(card.to_json() if args.json else card.to_markdown())
@@ -77,7 +87,13 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
                 "--recipe is mutually exclusive with --signals/--budget: a recipe already "
                 "fixes the full curation config. Pass one or the other, not both."
             )
-        return load_recipe(args.recipe)
+        curator = load_recipe(args.recipe)
+        if args.on_error is not None:
+            # An explicit --on-error overrides the recipe's policy: it is an operational
+            # read-tolerance knob, not part of the selection logic, and the run's manifest
+            # records the value actually used.
+            curator.on_error = args.on_error
+        return curator
     budget = Budget.fraction(args.budget) if args.budget is not None else None
     return Curator(
         _resolve_signals(_split_csv(args.signals)),
@@ -86,6 +102,7 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
         emit_baseline=not args.no_baseline,
         selection=SelectionMode(args.selection),
         coverage_quality_weight=args.coverage_quality_weight,
+        on_error=args.on_error or ON_ERROR_ABORT,
     )
 
 
@@ -693,6 +710,7 @@ def _curator_from_manifest(manifest: dict[str, Any]) -> Curator:
         selection=config.selection,
         gate_dict=config.gate_dict,
         batch_size=config.batch_size,
+        on_error=config.on_error,
     )
     return curator_from_config(augmented)
 
@@ -914,9 +932,23 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--seed", type=int, default=0, help="master seed (determinism).")
         p.add_argument("--json", action="store_true", help="emit machine-readable JSON.")
 
+    def add_on_error(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--on-error",
+            choices=[ON_ERROR_ABORT, ON_ERROR_QUARANTINE],
+            default=None,
+            dest="on_error",
+            help=(
+                "reading-error policy: 'abort' (default — never silently tolerate "
+                "corruption) or 'quarantine' (record each unreadable episode as removed, "
+                "exclude it from the baseline pool, and keep going)."
+            ),
+        )
+
     p_score = sub.add_parser("score", help="score a dataset and print a scorecard (no write).")
     p_score.add_argument("dataset", help="path to a LeRobotDataset directory.")
     p_score.add_argument("--signals", help="comma-separated signal names.")
+    add_on_error(p_score)
     add_common(p_score)
     p_score.set_defaults(func=_cmd_score)
 
@@ -925,6 +957,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_curate.add_argument("--out", required=True, help="destination for the curated dataset.")
     p_curate.add_argument("--signals", help="comma-separated signal names.")
     p_curate.add_argument("--budget", type=float, help="fraction of episodes to keep (0-1].")
+    add_on_error(p_curate)
     p_curate.add_argument(
         "--selection",
         choices=["top_k", "greedy_dedup", "coverage"],
