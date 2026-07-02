@@ -34,7 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path, is recorded as the dataset id so fingerprints and manifests from Hub sources are
   shareable. Needs the `lerobot` extra; without it, a Hub id fails with an actionable install
   hint.
-
+- **`robocurate rank` — a ranked "worst N episodes" report (read-only).** Scores every episode
+  with the cheap Tier-0 signals (or `--signals ...`), combines them with the same
+  orientation-aware normalization the curator uses, and prints the `--worst N` (default 10)
+  lowest keep-score episodes worst-first — each line naming the responsible signal(s) with the
+  raw value and its position in the dataset's range, so the ranking is never a black box. Turns
+  "watch 200 episodes" into "watch these 8" (the ask in huggingface/lerobot#3760) as a starting
+  diagnosis for "why doesn't my policy work". Episodes that *every* requested signal skipped are
+  listed as unscored with the skip reason, never silently ranked neutral; `--json` emits the full
+  machine-readable payload. Backing it, `CurationResult.keep_scores` and
+  `ScoreMatrix.normalized_signal_scores(...)` are new public accessors exposing the combined and
+  per-signal keep-oriented scores a run actually used.
 - **Four new CLI commands.** `profile` (a read-only dataset EDA report — episode-length and
   per-feature distributions, embodiment/task balance, success rate, and a nearest-neighbour
   diversity estimate; also `robocurate.dataset_profile`), `inspect <episode>` (one episode's
