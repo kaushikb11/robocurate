@@ -42,7 +42,12 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from robocurate.adapters.base import LeRobotVersion
-from robocurate.adapters.lerobot import _arrow_column_to_array, _infer_role, _is_image_key
+from robocurate.adapters.lerobot import (
+    _arrow_column_to_array,
+    _content_fingerprint,
+    _infer_role,
+    _is_image_key,
+)
 from robocurate.metadata import DatasetFingerprint, DatasetMeta
 from robocurate.trajectory import (
     Array,
@@ -54,7 +59,6 @@ from robocurate.trajectory import (
     Trajectory,
     TrajectoryMeta,
     VideoReference,
-    fingerprint_arrays,
 )
 
 CODEBASE_VERSION = "v3.0"
@@ -216,7 +220,7 @@ class LeRobotReaderV3:
             source_dataset_id=self.dataset_id,
             episode_index=index,
             embodiment=self._embodiment,
-            fingerprint=fingerprint_arrays(columns),
+            fingerprint=_content_fingerprint(columns),
             num_steps=rows.num_rows,
             source_format="lerobot_v3",
             success=self._read_success(columns),

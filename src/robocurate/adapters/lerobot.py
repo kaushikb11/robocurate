@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +63,19 @@ _CHUNK = "chunk-000"
 # Standard LeRobot bookkeeping columns written alongside the declared features.
 _BOOKKEEPING = ("episode_index", "frame_index", "index", "task_index")
 _IMAGE_PREFIXES = ("observation.images", "observation.image")
+
+
+def _content_fingerprint(columns: Mapping[str, Array]) -> str:
+    """Fingerprint the *content* columns only, never the positional bookkeeping.
+
+    ``episode_index`` / ``frame_index`` / ``index`` / ``task_index`` are positions, not
+    content: the writer re-indexes kept episodes ``0..k-1``, so including them would give a
+    round-tripped episode a new fingerprint whenever its position shifts — breaking the
+    contract that the fingerprint links a curated episode back to its source (``diff``,
+    dedup, and manifest matching all rely on it). Real v3 datasets declare the bookkeeping
+    columns as features, so the exclusion must happen here, not in the feature table.
+    """
+    return fingerprint_arrays({k: v for k, v in columns.items() if k not in _BOOKKEEPING})
 
 
 def _infer_role(key: str) -> FeatureRole:
@@ -208,7 +221,7 @@ class LeRobotReader:
             source_dataset_id=str(self.root),
             episode_index=index,
             embodiment=self._embodiment,
-            fingerprint=fingerprint_arrays(columns),
+            fingerprint=_content_fingerprint(columns),
             num_steps=table.num_rows,
             source_format=self.version.value,
             success=self._read_success(record, columns),

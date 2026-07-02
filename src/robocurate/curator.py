@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     import logging
     from pathlib import Path
 
-    from robocurate.adapters.base import DatasetReader, WriteReceipt
+    from robocurate.adapters.base import DatasetReader, DatasetWriter, WriteReceipt
     from robocurate.scorecard import Scorecard
     from robocurate.trajectory import Array, Trajectory
 
@@ -420,11 +420,9 @@ class CurationResult:
         to the Hugging Face Hub **after** the local write succeeds (reading only from ``dest``,
         never the source). The source dataset is never touched (Invariant 1).
         """
-        from robocurate.adapters.lerobot import LeRobotWriter
-
         reader = self._require_reader()
         source_root = getattr(reader, "root", None)
-        writer = LeRobotWriter(dest, source_root=source_root)
+        writer = _writer_for_source(reader, dest, source_root)
         manifest = self.build_manifest(created_utc=created_utc)
         kept = (reader.read_episode(i) for i in self.kept_episode_indices)
         receipt = writer.write(kept, manifest)
@@ -447,6 +445,27 @@ class CurationResult:
                 "fingerprinted (was it constructed outside Curator.run?)"
             )
         return self._reader
+
+
+def _writer_for_source(
+    reader: DatasetReader, dest: str | Path, source_root: str | Path | None
+) -> DatasetWriter:
+    """Pick the output writer matching the source's on-disk LeRobot version.
+
+    A v3.0 source writes back v3.0 (including the Stage-1 video-shard pass-through) so
+    curation never silently downgrades the format; everything else (v2.1, and non-LeRobot
+    readers such as RLDS/HDF5/Zarr) emits the v2.1 layout as before. The ``Dataset`` facade
+    is unwrapped so the dispatch sees the concrete reader's declared ``version``.
+    """
+    from robocurate.adapters.base import LeRobotVersion
+    from robocurate.adapters.lerobot import LeRobotWriter
+
+    concrete = getattr(reader, "reader", reader)
+    if getattr(concrete, "version", None) is LeRobotVersion.V3:
+        from robocurate.adapters.lerobot_v3_writer import LeRobotWriterV3
+
+        return LeRobotWriterV3(dest, source_root=source_root)
+    return LeRobotWriter(dest, source_root=source_root)
 
 
 # --------------------------------------------------------------------------------------
@@ -594,11 +613,37 @@ class Curator:
             for sig in signals:
                 for score in sig.score(batch, contexts[sig.spec.name]):
                     scores[(sig.spec.name, score.trajectory_fingerprint)] = score
+        self._warn_all_skipped(signals, scores, len(refs))
         return ScoreMatrix(
             refs=tuple(refs),
             signal_specs=tuple(s.spec for s in signals),
             scores=scores,
         )
+
+    def _warn_all_skipped(
+        self,
+        signals: list[Signal],
+        scores: dict[tuple[str, str], TrajectoryScore],
+        num_episodes: int,
+    ) -> None:
+        """Warn when a signal scored nothing at all — it contributes only neutral imputes.
+
+        Skips are recorded per-episode (never silent), but a signal that skips *every*
+        episode — e.g. an image signal on a dataset with no decodable video, or a sim-only
+        signal on real data — deserves one loud, actionable message rather than N quiet ones.
+        """
+        logger = self._logger_or_default()
+        for sig in signals:
+            own = [s for (name, _), s in scores.items() if name == sig.spec.name]
+            if own and all(s.skipped for s in own):
+                first_reason = next((s.skip_reason for s in own if s.skip_reason), "unknown")
+                logger.warning(
+                    "signal %s skipped all %d episodes (first reason: %s); it contributes "
+                    "nothing to this selection",
+                    sig.spec.name,
+                    num_episodes,
+                    first_reason,
+                )
 
     def _select(
         self, matrix: ScoreMatrix, signals: list[Signal], reader: DatasetReader

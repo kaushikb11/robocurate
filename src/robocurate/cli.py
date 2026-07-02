@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from robocurate import __version__, signals
-from robocurate.adapters.lerobot import LeRobotReader
 from robocurate.curator import Budget, Curator, SelectionMode
 from robocurate.scorecard import Scorecard
 from robocurate.signals.base import SignalContext
@@ -55,7 +54,7 @@ def _split_csv(value: str | None) -> list[str]:
 
 
 def _cmd_score(args: argparse.Namespace) -> int:
-    reader = LeRobotReader(args.dataset)
+    reader = _open_pool_reader(args.dataset)
     curator = Curator(_resolve_signals(_split_csv(args.signals)), seed=args.seed)
     result = curator.run(reader)
     card = result.scorecard()
@@ -92,7 +91,7 @@ def _curate_curator(args: argparse.Namespace) -> Curator:
 def _cmd_curate(args: argparse.Namespace) -> int:
     from robocurate.recipe import save_recipe
 
-    reader = LeRobotReader(args.dataset)
+    reader = _open_pool_reader(args.dataset)
     curator = _curate_curator(args)
     result = curator.run(reader)
     receipt = result.save(
@@ -121,7 +120,7 @@ def _cmd_curate(args: argparse.Namespace) -> int:
 
 
 def _cmd_baseline(args: argparse.Namespace) -> int:
-    reader = LeRobotReader(args.dataset)
+    reader = _open_pool_reader(args.dataset)
     curator = Curator(
         _resolve_signals(_split_csv(args.signals)),
         budget=Budget.count(args.n),
@@ -294,8 +293,8 @@ def _cmd_explain(args: argparse.Namespace) -> int:
 
 def _cmd_diff(args: argparse.Namespace) -> int:
     """Report which source episodes are absent from a curated dataset (read-only)."""
-    source = LeRobotReader(args.source)
-    curated = LeRobotReader(args.curated)
+    source = _open_pool_reader(args.source)
+    curated = _open_pool_reader(args.curated)
 
     curated_fingerprints = {t.meta.fingerprint for t in curated}
     curated_indices = {t.meta.episode_index for t in curated}
@@ -422,7 +421,7 @@ def _inspect_one(signal: Signal, traj: Any, ctx: SignalContext) -> dict[str, Any
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
     """Deep-dive one episode: run the requested signals and report value + per-transition trace."""
-    reader = LeRobotReader(args.dataset)
+    reader = _open_pool_reader(args.dataset)
     try:
         traj = reader.read_episode(args.episode_index)
     except IndexError as exc:
@@ -701,7 +700,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     """Re-run a saved manifest/recipe and assert the recomputed selection matches it."""
     from robocurate.recipe import load_recipe
 
-    reader = LeRobotReader(args.dataset)
+    reader = _open_pool_reader(args.dataset)
     spec = _load_manifest_or_none(args.spec)
 
     if spec is not None and "decisions" in spec:
@@ -809,7 +808,11 @@ def _verify_markdown(payload: dict[str, Any]) -> str:
 
 
 def _open_pool_reader(path: str) -> Any:
-    """Open a LeRobotDataset directory as a read-only reader (v2.1 or v3, auto-detected)."""
+    """Open a LeRobotDataset directory as a read-only reader (v2.1 or v3, auto-detected).
+
+    Every dataset-reading CLI command routes through here so that all of them accept both
+    on-disk LeRobot layouts; nothing outside this helper names a concrete reader class.
+    """
     from robocurate.dataset import Dataset
 
     return Dataset.from_lerobot(path).reader

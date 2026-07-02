@@ -59,6 +59,7 @@ from robocurate.adapters.base import (
 from robocurate.adapters.lerobot import (
     _array_to_arrow_column,
     _checksum_tree,
+    _content_fingerprint,
     _is_image_key,
 )
 from robocurate.adapters.lerobot_v3 import CODEBASE_VERSION, LeRobotReaderV3, _is_video_feature
@@ -70,7 +71,6 @@ from robocurate.trajectory import (
     FeatureSpec,
     Trajectory,
     VideoReference,
-    fingerprint_arrays,
 )
 
 _CHUNK = "chunk-000"
@@ -130,8 +130,9 @@ class LeRobotWriterV3(DatasetWriter):
     ends with schema + checksum + round-trip validation; any failure quarantines the partial output
     and raises (invariant 2). Kept episodes are re-indexed ``0..k-1`` (the output is fresh).
 
-    Video / image-role features are not persisted — see the module docstring — so this writer emits
-    a low-dim curated dataset and the round-trip is asserted over the low-dim columns only.
+    Video / image-role features are never decoded; the kept episodes' mp4 shard files are copied
+    byte-for-byte (Stage-1 pass-through — see the module docstring). The round-trip is asserted
+    over the low-dim parquet columns plus the copied shards' checksums.
     """
 
     def __init__(self, dest: str | Path, *, source_root: str | Path | None = None) -> None:
@@ -314,7 +315,9 @@ class LeRobotWriterV3(DatasetWriter):
             task_index = self._task_index(tasks, task_to_index)
             table, columns = self._episode_table(traj, out_index, global_index, task_index)
             sub_tables.append(table)
-            expected_fingerprints.append(fingerprint_arrays(columns))
+            # Content-only, like the reader: the rewritten bookkeeping columns are positions,
+            # not content, so a v3->v3 round trip preserves each episode's source fingerprint.
+            expected_fingerprints.append(_content_fingerprint(columns))
             episode_records.append(
                 {
                     "episode_index": out_index,
