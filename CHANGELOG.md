@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A signal that skips every episode now warns loudly** (e.g. a sim-only signal on real data, or
   an image signal on a dataset with no decodable video) instead of silently contributing only
   neutral imputed scores.
+- **A recipe saved from a default-weight run no longer silently reloads with zero signals.**
+  Recipes reconstruct signals from the combiner's weight keys, but a run built with default
+  (implicit 1.0) weights serialized as `weights: {}` — so `curate --signals jerk --save-recipe`
+  followed by `--recipe` re-ran with *no* signals and different decisions, without any error.
+  The config snapshot now records every running signal's weight explicitly (byte-identical
+  behavior), so saved recipes and manifests are self-contained.
 
 ### Added
 
@@ -45,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machine-readable payload. Backing it, `CurationResult.keep_scores` and
   `ScoreMatrix.normalized_signal_scores(...)` are new public accessors exposing the combined and
   per-signal keep-oriented scores a run actually used.
+- **User episode lists: `curate --drop-list` / `--keep-list` + `rank --out-flags`.** Curate from
+  a reviewed episode list: `--drop-list flags.json` removes the listed episodes unconditionally
+  (`--keep-list` restricts the pool instead), with signals now *optional* — a pure list-based
+  removal is a valid curation, i.e. the safe, non-destructive alternative to in-place episode
+  deletion (new dataset + manifest, source untouched). Lists pre-filter like the validity gate:
+  excluded from the valid pool AND the equal-N baseline pool, every removal recorded with an
+  explicit reason, and indices that match no episode warn loudly (the mistyped-index safety
+  rail). The lists are recorded in the manifest/recipe, so `verify` reproduces list-based runs
+  byte-identically. `rank --out-flags flags.json` writes the ranked worst-N indices in the
+  accepted format, closing the loop: rank → human review → `curate --drop-list`.
 - **Four new CLI commands.** `profile` (a read-only dataset EDA report — episode-length and
   per-feature distributions, embodiment/task balance, success rate, and a nearest-neighbour
   diversity estimate; also `robocurate.dataset_profile`), `inspect <episode>` (one episode's

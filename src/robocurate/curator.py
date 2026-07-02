@@ -327,6 +327,8 @@ class CurationConfig:
     selection: str = SelectionMode.TOP_K.value
     gate_dict: Mapping[str, Any] | None = None
     batch_size: int = DEFAULT_BATCH_SIZE
+    drop_episode_indices: tuple[int, ...] | None = None
+    keep_episode_indices: tuple[int, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -337,6 +339,12 @@ class CurationConfig:
             "selection": self.selection,
             "gate": dict(self.gate_dict) if self.gate_dict else None,
             "batch_size": self.batch_size,
+            "drop_episode_indices": (
+                list(self.drop_episode_indices) if self.drop_episode_indices is not None else None
+            ),
+            "keep_episode_indices": (
+                list(self.keep_episode_indices) if self.keep_episode_indices is not None else None
+            ),
         }
 
     @classmethod
@@ -354,6 +362,8 @@ class CurationConfig:
             else None
         )
         gate_dict = data.get("gate")
+        drop_indices = data.get("drop_episode_indices")
+        keep_indices = data.get("keep_episode_indices")
         return cls(
             combiner_dict=dict(data.get("combiner", {})),
             budget=budget,
@@ -362,6 +372,12 @@ class CurationConfig:
             selection=str(data.get("selection", SelectionMode.TOP_K.value)),
             gate_dict=dict(gate_dict) if gate_dict is not None else None,
             batch_size=int(data.get("batch_size", DEFAULT_BATCH_SIZE)),
+            drop_episode_indices=(
+                tuple(int(i) for i in drop_indices) if drop_indices is not None else None
+            ),
+            keep_episode_indices=(
+                tuple(int(i) for i in keep_indices) if keep_indices is not None else None
+            ),
         )
 
 
@@ -509,6 +525,8 @@ class Curator:
         batch_size: int = DEFAULT_BATCH_SIZE,
         resources: ResourceProbe | None = None,
         logger: logging.Logger | None = None,
+        drop_episode_indices: Iterable[int] | None = None,
+        keep_episode_indices: Iterable[int] | None = None,
     ) -> None:
         self.signals = list(signals)
         if combiner is None:
@@ -525,6 +543,25 @@ class Curator:
         self.batch_size = batch_size
         self.resources = resources if resources is not None else ResourceProbe()
         self._logger = logger
+        # User episode lists (e.g. flags exported from a review tool or `robocurate rank`).
+        # They pre-filter the pool like the validity gate does: removed unconditionally,
+        # excluded from the valid pool AND the equal-N baseline pool, every removal recorded.
+        # Signals are optional with a list — a pure list-based removal is a valid curation.
+        if drop_episode_indices is not None and keep_episode_indices is not None:
+            raise ValueError(
+                "drop_episode_indices and keep_episode_indices are mutually exclusive: a "
+                "drop-list removes the listed episodes, a keep-list removes everything else"
+            )
+        self.drop_episode_indices = (
+            frozenset(int(i) for i in drop_episode_indices)
+            if drop_episode_indices is not None
+            else None
+        )
+        self.keep_episode_indices = (
+            frozenset(int(i) for i in keep_episode_indices)
+            if keep_episode_indices is not None
+            else None
+        )
         if gate is not None and gate.signal not in {s.spec.name for s in self.signals}:
             raise ValueError(
                 f"gate references signal {gate.signal!r}, which is not among the curator's "
@@ -542,6 +579,8 @@ class Curator:
             seed=config.seed,
             emit_baseline=config.emit_baseline,
             batch_size=config.batch_size,
+            drop_episode_indices=config.drop_episode_indices,
+            keep_episode_indices=config.keep_episode_indices,
             **kwargs,
         )
 
@@ -668,10 +707,13 @@ class Curator:
         n = matrix.num_trajectories
         keep_score = self.combiner.combined_score(matrix)
 
-        # 1. Hard validity gate: rejected trajectories are removed before the budget and
-        #    excluded from the valid pool (and so from the equal-N baseline pool).
+        # 1. Hard validity gate + user episode lists: rejected trajectories are removed
+        #    before the budget and excluded from the valid pool (and so from the equal-N
+        #    baseline pool), each with an explicit recorded reason.
         gated = self._gated_positions(matrix)
-        valid = [i for i in range(n) if i not in gated]
+        listed = self._listed_out_positions(matrix)
+        excluded = gated | set(listed)
+        valid = [i for i in range(n) if i not in excluded]
 
         # 2. Budget is of the VALID pool.
         budget = self.budget if self.budget is not None else Budget.fraction(1.0)
@@ -699,7 +741,7 @@ class Curator:
                     episode_index=ref.episode_index,
                     fingerprint=ref.fingerprint,
                     kept=kept,
-                    reason=self._decision_reason(i, kept, gated, skipped, keep_score, k),
+                    reason=self._decision_reason(i, kept, gated, listed, skipped, keep_score, k),
                     signal_values=self._signal_values_for(matrix, ref.fingerprint),
                 )
             )
@@ -747,6 +789,37 @@ class Curator:
             if score is not None and not score.skipped and self.gate.rejects(score.value):
                 gated.add(i)
         return gated
+
+    def _listed_out_positions(self, matrix: ScoreMatrix) -> dict[int, str]:
+        """Positions removed by the user drop-/keep-list, each with its recorded reason.
+
+        Indices in a list that match no episode in the dataset are warned about rather than
+        silently ignored — a mistyped index is exactly how users have lost data with
+        in-place editing tools, so the mismatch must be loud.
+        """
+        if self.drop_episode_indices is None and self.keep_episode_indices is None:
+            return {}
+        present = {ref.episode_index for ref in matrix.refs}
+        listed: dict[int, str] = {}
+        if self.drop_episode_indices is not None:
+            unknown = sorted(self.drop_episode_indices - present)
+            for i, ref in enumerate(matrix.refs):
+                if ref.episode_index in self.drop_episode_indices:
+                    listed[i] = "removed: episode listed in the user drop-list"
+        else:
+            assert self.keep_episode_indices is not None
+            unknown = sorted(self.keep_episode_indices - present)
+            for i, ref in enumerate(matrix.refs):
+                if ref.episode_index not in self.keep_episode_indices:
+                    listed[i] = "removed: episode not in the user keep-list"
+        if unknown:
+            self._logger_or_default().warning(
+                "%d episode index(es) in the user list match no episode in this dataset "
+                "(indices: %s) — check for typos; the run continues without them",
+                len(unknown),
+                unknown,
+            )
+        return listed
 
     def _greedy_dedup(
         self,
@@ -918,12 +991,15 @@ class Curator:
         position: int,
         kept: bool,
         gated: set[int],
+        listed: dict[int, str],
         skipped: dict[int, str],
         keep_score: FloatArray,
         k: int,
     ) -> str:
         if position in gated:
             return f"removed by gate: {self.gate.signal} value tripped the validity threshold"  # type: ignore[union-attr]
+        if position in listed:
+            return listed[position]
         if kept:
             return f"kept: keep-score {keep_score[position]:.4f} (budget {k})"
         if position in skipped:
@@ -939,15 +1015,43 @@ class Curator:
             out[spec.name] = float("nan") if score is None or score.skipped else score.value
         return out
 
+    def _resolved_combiner_dict(self) -> dict[str, Any]:
+        """The combiner's serialized form, with every running signal's weight made explicit.
+
+        Recipes (and ``verify``) reconstruct a run's signals from the combiner's weight keys.
+        ``WeightedSum`` gives an unlisted signal an implicit weight of 1.0, so a run built with
+        default weights would serialize as ``weights: {}`` and silently reload with *zero*
+        signals — different decisions, no error. Recording the implicit 1.0s is byte-identical
+        in behavior and makes the snapshot self-contained. Non-WeightedSum combiners are left
+        untouched (their dict shape is their own).
+        """
+        combiner_dict = dict(self.combiner.to_dict())
+        if isinstance(self.combiner, WeightedSum):
+            weights = dict(combiner_dict.get("weights", {}))
+            for sig in self.signals:
+                weights.setdefault(sig.spec.name, 1.0)
+            combiner_dict["weights"] = weights
+        return combiner_dict
+
     def _config_snapshot(self) -> CurationConfig:
         return CurationConfig(
-            combiner_dict=self.combiner.to_dict(),
+            combiner_dict=self._resolved_combiner_dict(),
             budget=self.budget,
             seed=self.seed,
             emit_baseline=self.emit_baseline,
             selection=self.selection.value,
             gate_dict=self.gate.to_dict() if self.gate else None,
             batch_size=self.batch_size,
+            drop_episode_indices=(
+                tuple(sorted(self.drop_episode_indices))
+                if self.drop_episode_indices is not None
+                else None
+            ),
+            keep_episode_indices=(
+                tuple(sorted(self.keep_episode_indices))
+                if self.keep_episode_indices is not None
+                else None
+            ),
         )
 
 

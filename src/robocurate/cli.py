@@ -65,29 +65,72 @@ def _cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_episode_index_list(path: str) -> list[int]:
+    """Read a user episode list: a JSON array of indices, or ``{"episode_indices": [...]}``.
+
+    The dict form is what ``rank --out-flags`` writes, so a review loop round-trips without
+    editing; the bare-array form is the lowest-friction hand-written input.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"could not read episode list {path}: {exc}") from exc
+    if isinstance(data, dict):
+        data = data.get("episode_indices")
+    if not isinstance(data, list) or not all(isinstance(i, int) for i in data):
+        raise SystemExit(
+            f"episode list {path} must be a JSON array of integer episode indices, or an "
+            'object of the form {"episode_indices": [...]}'
+        )
+    return [int(i) for i in data]
+
+
 def _curate_curator(args: argparse.Namespace) -> Curator:
     """Build the curator for a ``curate`` run: from a recipe, or from --signals/--budget.
 
-    A recipe is mutually exclusive with --signals/--budget: a recipe already fixes the full
-    config (combiner, budget, selection, gate, seed), so mixing the two would be ambiguous.
+    A recipe is mutually exclusive with --signals/--budget/--drop-list/--keep-list: a recipe
+    already fixes the full config (combiner, budget, selection, gate, seed, episode lists), so
+    mixing the two would be ambiguous.
     """
     from robocurate.recipe import load_recipe
 
     if args.recipe is not None:
-        if args.signals or args.budget is not None:
+        if (
+            args.signals
+            or args.budget is not None
+            or args.drop_list is not None
+            or args.keep_list is not None
+        ):
             raise SystemExit(
-                "--recipe is mutually exclusive with --signals/--budget: a recipe already "
-                "fixes the full curation config. Pass one or the other, not both."
+                "--recipe is mutually exclusive with --signals/--budget/--drop-list/"
+                "--keep-list: a recipe already fixes the full curation config. Pass one or "
+                "the other, not both."
             )
         return load_recipe(args.recipe)
+    if args.drop_list is not None and args.keep_list is not None:
+        raise SystemExit(
+            "--drop-list and --keep-list are mutually exclusive: a drop-list removes the "
+            "listed episodes, a keep-list removes everything else."
+        )
+    drop = _read_episode_index_list(args.drop_list) if args.drop_list is not None else None
+    keep = _read_episode_index_list(args.keep_list) if args.keep_list is not None else None
+    names = _split_csv(args.signals)
+    if not names and drop is None and keep is None:
+        # Preserve the standard "which signals exist" error when there is nothing to do.
+        _resolve_signals(names)
+    # With a drop-/keep-list, signals are optional: a pure list-based removal (e.g. flags
+    # exported from a review tool or `rank --out-flags`) is a valid curation on its own.
+    signals_resolved = _resolve_signals(names) if names else []
     budget = Budget.fraction(args.budget) if args.budget is not None else None
     return Curator(
-        _resolve_signals(_split_csv(args.signals)),
+        signals_resolved,
         budget=budget,
         seed=args.seed,
         emit_baseline=not args.no_baseline,
         selection=SelectionMode(args.selection),
         coverage_quality_weight=args.coverage_quality_weight,
+        drop_episode_indices=drop,
+        keep_episode_indices=keep,
     )
 
 
@@ -519,6 +562,11 @@ def _cmd_rank(args: argparse.Namespace) -> int:
     curator = Curator(resolved, seed=args.seed, emit_baseline=False)
     result = curator.run(reader)
     payload = _rank_payload(result, dataset=str(args.dataset), worst=args.worst, seed=args.seed)
+    if args.out_flags is not None:
+        # The review loop's hand-off: rank → human review → `curate --drop-list <flags>`.
+        # Deliberately just the ranked worst-N indices, in a shape curate accepts verbatim.
+        flags = {"episode_indices": [e["episode_index"] for e in payload["worst"]]}
+        Path(args.out_flags).write_text(json.dumps(flags, indent=2), encoding="utf-8")
     print(json.dumps(payload) if args.json else _rank_markdown(payload))
     return 0
 
@@ -892,6 +940,8 @@ def _curator_from_manifest(manifest: dict[str, Any]) -> Curator:
         selection=config.selection,
         gate_dict=config.gate_dict,
         batch_size=config.batch_size,
+        drop_episode_indices=config.drop_episode_indices,
+        keep_episode_indices=config.keep_episode_indices,
     )
     return curator_from_config(augmented)
 
@@ -1138,6 +1188,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_curate.add_argument("--signals", help="comma-separated signal names.")
     p_curate.add_argument("--budget", type=float, help="fraction of episodes to keep (0-1].")
     p_curate.add_argument(
+        "--drop-list",
+        help="JSON file of episode indices to remove unconditionally (a JSON array, or "
+        '{"episode_indices": [...]} as written by rank --out-flags). Signals become optional: '
+        "a pure list-based removal is a valid curation. Mutually exclusive with --keep-list.",
+    )
+    p_curate.add_argument(
+        "--keep-list",
+        help="JSON file of episode indices to restrict the pool to; everything else is "
+        "removed (same formats as --drop-list). Mutually exclusive with --drop-list.",
+    )
+    p_curate.add_argument(
         "--selection",
         choices=["top_k", "greedy_dedup", "coverage"],
         default="top_k",
@@ -1244,6 +1305,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="how many episodes to surface (default 10, capped at the dataset size).",
+    )
+    p_rank.add_argument(
+        "--out-flags",
+        help="also write the ranked episode indices as a flags JSON file "
+        '({"episode_indices": [...]}) that curate --drop-list accepts — review, then remove.',
     )
     add_common(p_rank)
     p_rank.set_defaults(func=_cmd_rank)

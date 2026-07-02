@@ -105,6 +105,8 @@ def curator_from_config(config: CurationConfig) -> Curator:
         selection=SelectionMode(config.selection),
         gate=_gate_from_dict(config.gate_dict),
         batch_size=config.batch_size,
+        drop_episode_indices=config.drop_episode_indices,
+        keep_episode_indices=config.keep_episode_indices,
     )
 
 

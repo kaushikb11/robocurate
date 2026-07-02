@@ -60,7 +60,9 @@ The full strategy, the honest competitive picture, and where we're weak today ar
   + a shared schema) that curate any one-group-per-episode HDF5/Zarr dataset. (v3 video-frame decode
   is a follow-up; low-dim curation needs only pyarrow.)
 - **Curator + CLI**: target-budget selection (three modes, see below), equal-N random baseline,
-  hard validity-gate. CLI `curate` / `report` / `diff`, plus `list-signals` (every loadable signal
+  hard validity-gate, and user episode lists (`--drop-list`/`--keep-list` — curate from a
+  reviewed flag list, signals optional; the safe, manifest-recorded alternative to in-place
+  episode deletion). CLI `curate` / `report` / `diff`, plus `list-signals` (every loadable signal
   and its install extra), `validate` (alias `doctor` — a read-only dataset health check),
   `profile` (a dataset EDA report: length/feature distributions, task balance, a diversity
   estimate), `inspect` (one episode's per-signal values + per-transition trace), `rank` (a

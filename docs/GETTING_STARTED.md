@@ -76,6 +76,24 @@ uv run robocurate rank ./demo_dataset --worst 3
 uv run robocurate explain ./demo_curated 3
 ```
 
+## The review loop: rank → review → remove
+
+`rank --out-flags` writes the worst episodes as a small flags file; after you review it (edit
+out any episode you disagree with), `curate --drop-list` removes exactly those — emitting a new
+dataset + manifest, never touching the source. This is the safe alternative to in-place episode
+deletion, and it needs no signals at all:
+
+```
+uv run robocurate rank ./demo_dataset --worst 3 --out-flags ./flags.json
+# ... review flags.json, then:
+uv run robocurate curate ./demo_dataset --out ./demo_cleaned --drop-list ./flags.json
+```
+
+The flags file is just `{"episode_indices": [...]}` (a bare JSON array works too), so a list
+exported from any review tool plugs in the same way. Every removal is recorded in the manifest
+with its reason, a mistyped index warns loudly instead of being ignored, and `verify` can prove
+the run reproduces byte-identically.
+
 ## Save a recipe, reproduce the run
 
 A *recipe* captures the full run config — combiner, budget, selection, gate, seed — as a small
