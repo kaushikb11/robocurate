@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,8 +32,9 @@ def _demo(tmp_path: Path) -> Path:
     return src
 
 
-def _manifest(out: Path) -> dict:
-    return json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+def _manifest(out: Path) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    return data
 
 
 def test_pure_drop_list_curation_no_signals(tmp_path: Path) -> None:

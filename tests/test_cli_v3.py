@@ -122,7 +122,9 @@ def test_default_write_with_missing_shards_errors_with_the_escape_hatch(tmp_path
     assert receipt.path.is_dir()
 
 
-def test_cli_score_inspect_diff_verify_on_v3(tmp_path: Path, capsys) -> None:
+def test_cli_score_inspect_diff_verify_on_v3(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     src = tmp_path / "src"
     src.mkdir()
     _write_synthetic_v3(src, lengths=[8, 8, 8, 8])
@@ -144,14 +146,14 @@ def test_cli_score_inspect_diff_verify_on_v3(tmp_path: Path, capsys) -> None:
     assert main(["verify", str(src), str(out / "manifest.json"), "--json"]) == 0
 
 
-def test_cli_baseline_on_v3(tmp_path: Path, capsys) -> None:
+def test_cli_baseline_on_v3(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     src = tmp_path / "src"
     src.mkdir()
     _write_synthetic_v3(src, lengths=[8, 8, 8, 8])
     assert main(["baseline", str(src), "--n", "2", "--signals", "jerk"]) == 0
 
 
-def test_all_skipped_signal_warns(tmp_path: Path, caplog) -> None:
+def test_all_skipped_signal_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """A signal that skips every episode warns loudly instead of silently imputing neutral."""
     from robocurate.curator import Budget, Curator
     from robocurate.signals.jerk import Jerk
