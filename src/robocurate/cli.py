@@ -151,12 +151,17 @@ def _cmd_curate(args: argparse.Namespace) -> int:
     from robocurate.recipe import save_recipe
 
     curator = _curate_curator(args)
-    reader = _open_pool_reader(args.dataset, include_videos=_needs_video(curator.signals))
+    # Curate writes an output, and the faithful default preserves the source's video (Stage-1
+    # shard pass-through) — so a Hub download must include the mp4 shards unless the user
+    # explicitly asked for a low-dim output. An image signal also needs the frames regardless.
+    include_videos = (not args.no_videos) or _needs_video(curator.signals)
+    reader = _open_pool_reader(args.dataset, include_videos=include_videos)
     result = curator.run(reader)
     receipt = result.save(
         args.out,
         write_card=not args.no_card,
         push_to_hub=args.push_to_hub,
+        write_videos=not args.no_videos,
     )
     if args.report_html is not None:
         Path(args.report_html).write_text(result.scorecard().to_html(), encoding="utf-8")
@@ -1226,6 +1231,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep-list",
         help="JSON file of episode indices to restrict the pool to; everything else is "
         "removed (same formats as --drop-list). Mutually exclusive with --drop-list.",
+    )
+    p_curate.add_argument(
+        "--no-videos",
+        action="store_true",
+        help="emit an explicitly low-dim output: skip the video-shard pass-through AND omit "
+        "the video features from the output's schema (the output claims exactly what it "
+        "contains). Also skips downloading mp4 shards for a Hub-id source. Default: faithful "
+        "— video is preserved, and a missing source shard is a hard error.",
     )
     p_curate.add_argument(
         "--selection",

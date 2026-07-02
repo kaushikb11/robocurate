@@ -135,9 +135,21 @@ class LeRobotWriterV3(DatasetWriter):
     over the low-dim parquet columns plus the copied shards' checksums.
     """
 
-    def __init__(self, dest: str | Path, *, source_root: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        dest: str | Path,
+        *,
+        source_root: str | Path | None = None,
+        write_videos: bool = True,
+    ) -> None:
         self.dest = Path(dest)
         self._source_root = Path(source_root).resolve() if source_root else None
+        # ``write_videos=False`` emits an *honestly low-dim* output: no shards are copied AND
+        # the video features are omitted from the output's declared schema, so the result is a
+        # valid dataset that claims exactly what it contains. The default is faithful
+        # pass-through; a missing source shard under the default is a hard error, never a
+        # silent downgrade (invariant 2).
+        self._write_videos = write_videos
         self._guard_destination()
 
     def _guard_destination(self) -> None:
@@ -171,10 +183,16 @@ class LeRobotWriterV3(DatasetWriter):
                 trajectories, expected_fingerprints
             )
             self._write_data(data_table)
-            # Stage-1 image/video pass-through: copy each referenced source mp4 shard into the
-            # output videos/ tree and checksum it against the source (invariant 2). This mutates
-            # episode_records in place to carry the per-key shard indices + timestamp slice.
-            copied_video_checksums = self._copy_videos(episode_records, episode_refs)
+            if self._write_videos:
+                # Stage-1 image/video pass-through: copy each referenced source mp4 shard into
+                # the output videos/ tree and checksum it against the source (invariant 2).
+                # This mutates episode_records in place to carry the per-key shard indices +
+                # timestamp slice.
+                copied_video_checksums = self._copy_videos(episode_records, episode_refs)
+            else:
+                # Requested low-dim output: no shards, and no video features declared either.
+                copied_video_checksums = {}
+                video_specs = {}
             self._write_meta(embodiment, episode_records, tasks, video_specs)
             manifest_path = self.dest / "manifest.json"
 
@@ -465,7 +483,13 @@ class LeRobotWriterV3(DatasetWriter):
     def _copy_one_shard(source: Path, dest: Path) -> None:
         """Copy one mp4 shard byte-for-byte and verify the copy matches the source (invariant 2)."""
         if not source.is_file():
-            raise ValidationError(f"video shard missing at source: {source}")
+            raise ValidationError(
+                f"video shard missing at source: {source}. The source declares video features "
+                "but their mp4 shards are not on disk (e.g. a low-dim-only Hub download). "
+                "Either provide the shards, or request an explicitly low-dim output "
+                "(curate --no-videos / save(write_videos=False)) — the output then declares "
+                "no video features rather than silently dropping them."
+            )
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)  # copy, never move — the source is read-only (invariant 1)
         if _sha256_file(dest) != _sha256_file(source):

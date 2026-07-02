@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`curate --no-videos` — an explicitly low-dim output.** Skips the video-shard pass-through
+  AND omits the video features from the output's declared schema, so the result claims exactly
+  what it contains — never a silent drop. Also skips downloading mp4 shards for a Hub-id
+  source. The default stays faithful: `curate` on a Hub id downloads the shards so the output
+  preserves video, and a missing source shard is a hard error whose message names the escape
+  hatch. (Found by running the real-Hub smoke test: a video-declaring dataset downloaded
+  low-dim-only was previously impossible to curate.)
 - **Hub-id ingestion.** `Dataset.from_lerobot` (and every dataset-reading CLI command) accepts a
   `namespace/name` Hugging Face Hub dataset id as well as a local directory (an existing local
   path always wins). Hub ids snapshot-download through the `huggingface_hub` cache — **low-dim

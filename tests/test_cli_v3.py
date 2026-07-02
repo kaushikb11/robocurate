@@ -13,6 +13,8 @@ import json
 import logging
 from pathlib import Path
 
+import pytest
+
 from robocurate.adapters.lerobot_v3 import LeRobotReaderV3
 from robocurate.cli import main
 from tests.test_lerobot_v3_image import _write_synthetic_v3_with_video
@@ -68,6 +70,56 @@ def test_cli_curate_v3_passes_video_shards_through(tmp_path: Path) -> None:
     copied_payloads = {p.read_bytes() for p in copied}
     assert copied_payloads <= set(shard_bytes.values())
     assert all(t.video_references() for t in kept)  # the reloaded episodes still see video
+
+
+def test_cli_curate_no_videos_emits_honest_low_dim_output(tmp_path: Path) -> None:
+    """--no-videos: no shards copied AND no video features declared — never a silent drop."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _write_synthetic_v3_with_video(src, lengths=[8, 8, 8, 8])
+
+    out = tmp_path / "curated"
+    rc = main(
+        [
+            "curate",
+            str(src),
+            "--out",
+            str(out),
+            "--signals",
+            "jerk",
+            "--budget",
+            "0.5",
+            "--no-videos",
+        ]
+    )
+    assert rc == 0
+    assert not (out / "videos").exists()
+    info = json.loads((out / "meta" / "info.json").read_text(encoding="utf-8"))
+    assert not any(s.get("dtype") in ("video", "image") for s in info["features"].values())
+    reloaded = LeRobotReaderV3(out)
+    assert len(reloaded) == 2
+    assert reloaded.read_episode(0).video_references() == {}
+
+
+def test_default_write_with_missing_shards_errors_with_the_escape_hatch(tmp_path: Path) -> None:
+    """A video-declaring source without shards on disk must fail loudly, naming --no-videos."""
+    import shutil
+
+    from robocurate.adapters.base import ValidationError
+    from robocurate.curator import Budget, Curator
+    from robocurate.signals.jerk import Jerk
+
+    src = tmp_path / "src"
+    src.mkdir()
+    _write_synthetic_v3_with_video(src, lengths=[8, 8])
+    shutil.rmtree(src / "videos")  # simulate a low-dim-only download of a video dataset
+
+    result = Curator([Jerk()], budget=Budget.fraction(0.5), seed=0).run(LeRobotReaderV3(src))
+    with pytest.raises(ValidationError, match="no-videos"):
+        result.save(tmp_path / "curated")
+    # The escape hatch produces a valid low-dim output from the same result.
+    receipt = result.save(tmp_path / "curated_lowdim", write_videos=False)
+    assert receipt.path.is_dir()
 
 
 def test_cli_score_inspect_diff_verify_on_v3(tmp_path: Path, capsys) -> None:

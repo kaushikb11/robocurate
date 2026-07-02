@@ -452,6 +452,7 @@ class CurationResult:
         created_utc: str | None = None,
         write_card: bool = True,
         push_to_hub: str | None = None,
+        write_videos: bool = True,
     ) -> WriteReceipt:
         """Write the curated subset (kept episodes) plus the manifest to ``dest``.
 
@@ -465,7 +466,7 @@ class CurationResult:
         """
         reader = self._require_reader()
         source_root = getattr(reader, "root", None)
-        writer = _writer_for_source(reader, dest, source_root)
+        writer = _writer_for_source(reader, dest, source_root, write_videos=write_videos)
         manifest = self.build_manifest(created_utc=created_utc)
         kept = (reader.read_episode(i) for i in self.kept_episode_indices)
         receipt = writer.write(kept, manifest)
@@ -491,7 +492,11 @@ class CurationResult:
 
 
 def _writer_for_source(
-    reader: DatasetReader, dest: str | Path, source_root: str | Path | None
+    reader: DatasetReader,
+    dest: str | Path,
+    source_root: str | Path | None,
+    *,
+    write_videos: bool = True,
 ) -> DatasetWriter:
     """Pick the output writer matching the source's on-disk LeRobot version.
 
@@ -507,7 +512,7 @@ def _writer_for_source(
     if getattr(concrete, "version", None) is LeRobotVersion.V3:
         from robocurate.adapters.lerobot_v3_writer import LeRobotWriterV3
 
-        return LeRobotWriterV3(dest, source_root=source_root)
+        return LeRobotWriterV3(dest, source_root=source_root, write_videos=write_videos)
     return LeRobotWriter(dest, source_root=source_root)
 
 
